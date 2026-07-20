@@ -1,0 +1,51 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Runtime databases
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Chroma runtime data
+data/chroma/
+data/test_chroma/
+
+# Model caches
+.cache/
+huggingface/
+models_cache/
+
+# Logs
+*.log
+uvicorn.log
+uvicorn.err
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code project settings (machine-specific)
+.claude/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
