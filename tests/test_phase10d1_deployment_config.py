@@ -337,4 +337,4 @@ class TestLifespan:
             async with main_mod.lifespan(main_mod.app):
                 pass
 
-        mock_load.assert_called_once_with(nutrition_dir, chroma_dir)
+        mock_load.assert_called_once_with(nutrition_dir, chroma_dir, replace=False)

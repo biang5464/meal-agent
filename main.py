@@ -4,6 +4,8 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 
+import core.runtime_paths as _rp
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,19 +40,28 @@ load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时初始化所有外部依赖
-    persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
-    init_db(os.getenv("SQLITE_DB_PATH", "./data/users.db"))
-    init_dead_letter_db(os.getenv("DEAD_LETTER_DB_PATH", "./data/dead_letter.db"))
-    init_chroma(persist_dir)
+    _rp.ensure_runtime_dirs()
+    persist_str = str(_rp.chroma_dir())
+
+    init_db(str(_rp.sqlite_path()))
+    init_dead_letter_db(str(_rp.dead_letter_path()))
+    init_chroma(persist_str)
     init_conversation_memory_chroma()
-    init_nutrition_chroma(persist_dir)
-    load_nutrition_documents(os.getenv("NUTRITION_DIR", "./data/nutrition"), persist_dir)
-    init_food_safety_chroma(persist_dir)
-    load_food_safety_documents(os.getenv("FOOD_SAFETY_DIR", "./data/food_safety"), persist_dir)
-    start_scheduler()
-    yield
-    stop_scheduler()
+    init_nutrition_chroma(persist_str)
+    load_nutrition_documents(str(_rp.nutrition_dir()), persist_str, replace=False)
+    init_food_safety_chroma(persist_str)
+    load_food_safety_documents(str(_rp.food_safety_dir()), persist_str, replace=False)
+
+    scheduler_started = False
+    if _rp.env_flag("RUN_SCHEDULER", default=True):
+        start_scheduler()
+        scheduler_started = True
+
+    try:
+        yield
+    finally:
+        if scheduler_started:
+            stop_scheduler()
 
 
 # ---------- App ----------
