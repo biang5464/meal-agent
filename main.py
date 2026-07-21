@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 import core.runtime_paths as _rp
 
+from core.web_config import get_allowed_origins
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,9 +76,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_allowed_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=False,
 )
 
 
@@ -93,7 +95,7 @@ class RecommendRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "service": "meal-agent"}
 
 
 @app.post("/recommend")
