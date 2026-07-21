@@ -4,12 +4,12 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import dynamic from 'next/dynamic';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { apiUrl } from './lib/api';
 
 const PriceChart = dynamic(() => import('./components/PriceChart'), { ssr: false });
 const DailyRecommendation = dynamic(() => import('./components/DailyRecommendation'), { ssr: false });
 
 const USER_ID = 'test_user';
-const API_URL = 'http://localhost:8000/recommend';
 
 type Message = {
   role: 'user' | 'agent';
@@ -47,7 +47,7 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const res = await fetch(API_URL, {
+      const res = await fetch(apiUrl('/recommend'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: USER_ID, message: text }),

@@ -12,6 +12,7 @@ import {
   Legend,
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
+import { apiUrl } from '../lib/api'
 
 ChartJS.register(
   CategoryScale,
@@ -22,8 +23,6 @@ ChartJS.register(
   Tooltip,
   Legend
 )
-
-const API_BASE = 'http://localhost:8000'
 
 const PLATFORM_COLORS: Record<string, string> = {
   woolworths: '#007B40',
@@ -62,7 +61,7 @@ export default function PriceChart() {
   const [error, setError] = useState<string>('')
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/tracked-terms`)
+    fetch(apiUrl('/api/tracked-terms'))
       .then(r => r.json())
       .then(d => {
         setTerms(d.terms || [])
@@ -75,7 +74,7 @@ export default function PriceChart() {
     if (!selectedTerm) return
     setLoading(true)
     setError('')
-    fetch(`${API_BASE}/api/price-history/${encodeURIComponent(selectedTerm)}?mode=${mode}&days=30`)
+    fetch(apiUrl(`/api/price-history/${encodeURIComponent(selectedTerm)}?mode=${mode}&days=30`))
       .then(r => r.json())
       .then(d => setChartData(d))
       .catch(() => setError('加载价格数据失败'))

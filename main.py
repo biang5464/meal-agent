@@ -18,7 +18,12 @@ from tools.dead_letter import init_dead_letter_db
 from tools.memory import init_db
 from tools.timeout_config import TimeoutConfig
 from tools.memory import init_conversation_memory_chroma
-from tools.nutrition import init_food_safety_chroma, load_food_safety_documents
+from tools.nutrition import (
+    init_food_safety_chroma,
+    init_nutrition_chroma,
+    load_food_safety_documents,
+    load_nutrition_documents,
+)
 from tools.recipe import init_chroma
 from tools.price_history import (
     get_tracked_terms,
@@ -34,13 +39,15 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时初始化所有外部依赖
+    persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
     init_db(os.getenv("SQLITE_DB_PATH", "./data/users.db"))
     init_dead_letter_db(os.getenv("DEAD_LETTER_DB_PATH", "./data/dead_letter.db"))
-    init_chroma(os.getenv("CHROMA_PERSIST_DIR", "./data/chroma"))
+    init_chroma(persist_dir)
     init_conversation_memory_chroma()
-    persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
+    init_nutrition_chroma(persist_dir)
+    load_nutrition_documents(os.getenv("NUTRITION_DIR", "./data/nutrition"), persist_dir)
     init_food_safety_chroma(persist_dir)
-    load_food_safety_documents("./data/food_safety", persist_dir)
+    load_food_safety_documents(os.getenv("FOOD_SAFETY_DIR", "./data/food_safety"), persist_dir)
     start_scheduler()
     yield
     stop_scheduler()

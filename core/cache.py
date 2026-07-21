@@ -1,10 +1,30 @@
 import json
+import os
 import redis
 from datetime import datetime
 
 from core.tool_protocol import ToolMeta, ToolResult
 
-_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+
+def _build_redis_client() -> redis.Redis:
+    """Build a Redis client from environment variables.
+
+    Priority:
+    1. REDIS_URL  — full connection URL (supports redis:// and rediss://)
+    2. REDIS_HOST / REDISHOST  + REDIS_PORT / REDISPORT + REDIS_DB
+    3. localhost:6379/0
+    """
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        return redis.from_url(redis_url, decode_responses=True)
+
+    host = os.getenv("REDIS_HOST") or os.getenv("REDISHOST") or "localhost"
+    port = int(os.getenv("REDIS_PORT") or os.getenv("REDISPORT") or "6379")
+    db = int(os.getenv("REDIS_DB") or "0")
+    return redis.Redis(host=host, port=port, db=db, decode_responses=True)
+
+
+_client = _build_redis_client()
 
 # 配置常量（以后改这里）
 PROFILE_TTL = 300        # 用户画像缓存 5分钟
