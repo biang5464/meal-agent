@@ -12,7 +12,6 @@ from tools.timeout_config import TimeoutConfig
 logger = logging.getLogger(__name__)
 
 import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 NUTRITION_COLLECTION = "nutrition"
@@ -28,8 +27,9 @@ _food_safety_collection: chromadb.Collection | None = None
 _food_safety_client: chromadb.ClientAPI | None = None
 
 
-def _make_ef() -> SentenceTransformerEmbeddingFunction:
-    return SentenceTransformerEmbeddingFunction(model_name=_EMBEDDING_MODEL)
+def _make_ef():
+    from core.embedding_runtime import get_embedding_function
+    return get_embedding_function()
 
 
 def init_nutrition_chroma(persist_dir: str | None = None) -> chromadb.Collection:

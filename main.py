@@ -43,6 +43,21 @@ _AUTH_CONFIG = get_api_security_config()
 _RL_CONFIG = get_rate_limit_config()
 
 
+def _log_rss(phase: str) -> None:
+    """Log process RSS after each startup phase. Linux only, no psutil needed."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    import logging
+                    logging.getLogger(__name__).info(
+                        "startup %s rss_mb=%.0f", phase, int(line.split()[1]) / 1024
+                    )
+                    break
+    except Exception:
+        pass
+
+
 # ---------- 生命周期 ----------
 
 @asynccontextmanager
@@ -53,11 +68,17 @@ async def lifespan(app: FastAPI):
     init_db(str(_rp.sqlite_path()))
     init_dead_letter_db(str(_rp.dead_letter_path()))
     init_chroma(persist_str)
+    _log_rss("recipe_chroma")
     init_conversation_memory_chroma()
+    _log_rss("conv_memory")
     init_nutrition_chroma(persist_str)
+    _log_rss("nutrition_chroma")
     load_nutrition_documents(str(_rp.nutrition_dir()), persist_str, replace=False)
+    _log_rss("nutrition_docs")
     init_food_safety_chroma(persist_str)
+    _log_rss("food_safety_chroma")
     load_food_safety_documents(str(_rp.food_safety_dir()), persist_str, replace=False)
+    _log_rss("food_safety_docs")
 
     scheduler_started = False
     if _rp.env_flag("RUN_SCHEDULER", default=True):

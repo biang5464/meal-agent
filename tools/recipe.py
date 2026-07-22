@@ -7,14 +7,14 @@ import os
 from typing import List
 
 import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from langchain_core.tools import tool
 
 _EMBEDDING_MODEL = "BAAI/bge-small-zh"
 
 
-def _make_ef() -> SentenceTransformerEmbeddingFunction:
-    return SentenceTransformerEmbeddingFunction(model_name=_EMBEDDING_MODEL)
+def _make_ef():
+    from core.embedding_runtime import get_embedding_function
+    return get_embedding_function()
 
 _collection: chromadb.Collection | None = None
 _client = None  # chromadb.ClientAPI
