@@ -11,13 +11,14 @@ Design decisions:
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from tools.tool_executor import tool_executor
 
 if TYPE_CHECKING:
     import redis as _redis_mod
@@ -204,14 +205,16 @@ class RateLimitMiddleware:
         client_id = _get_client_id(scope)
         redis_key = f"ratelimit:{path.strip('/')}:{client_id}"
 
-        try:
-            from core.cache import _client as redis_client  # existing singleton
-            count, ttl = await asyncio.wait_for(
-                asyncio.to_thread(_run_lua, redis_client, redis_key, window_seconds),
-                timeout=0.5,  # rate_limit_write policy timeout
-            )
-        except Exception as exc:
-            logger.warning("[rate_limit] Redis error path=%s err=%s", path, exc)
+        from core.cache import _client as redis_client  # existing singleton
+        result = await tool_executor.execute(
+            _run_lua,
+            redis_client, redis_key, window_seconds,
+            policy_name="rate_limit_write",
+            tool_name="rate_limit_lua",
+        )
+        if not result.ok:
+            err_code = result.error.code.value if result.error else "unknown"
+            logger.warning("[rate_limit] Redis error path=%s code=%s", path, err_code)
             if self._config.app_env == "production" and _is_cost_bearing(path):
                 # fail-close: do NOT call LLM/Graph
                 await send({
@@ -228,6 +231,8 @@ class RateLimitMiddleware:
             # dev or non-cost-bearing: fail-open
             await self._app(scope, receive, send)
             return
+
+        count, ttl = result.data
 
         if count > limit:
             retry_after = max(ttl, 1)

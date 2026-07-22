@@ -140,7 +140,7 @@ class TestRateLimitMiddlewareDisabled:
 class TestRateLimitExemptPaths:
     def setup_method(self):
         mock_redis = _make_mock_redis(count=999, ttl=55)
-        self._patch = patch("core.rate_limit.asyncio.to_thread", side_effect=Exception("should not call"))
+        self._patch = patch("tools.tool_executor.asyncio.to_thread", side_effect=Exception("should not call"))
         self._patch.start()
         # Exempt paths never reach Redis
         from core.rate_limit import RateLimitMiddleware, RateLimitConfig
@@ -176,7 +176,7 @@ class TestRateLimitWithinLimit:
         app = _make_rl_app(enabled=True, recommend_per_min=limit, read_per_min=60)
         client = TestClient(app)
 
-        with patch("core.rate_limit.asyncio.to_thread", side_effect=fake_to_thread), \
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=fake_to_thread), \
              patch("core.cache._client", mock_redis):
             return client, mock_redis
 
@@ -196,7 +196,7 @@ class TestRateLimitWithinLimit:
         def recommend():
             return {"ok": True}
 
-        with patch("core.rate_limit.asyncio.to_thread", side_effect=fake_to_thread), \
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=fake_to_thread), \
              patch("core.cache._client", mock_redis):
             client = TestClient(app)
             res = client.post("/recommend")
@@ -236,7 +236,7 @@ class TestRateLimitOverLimit:
             return fn(*args, **kwargs)
 
         app = _make_over_limit_app(limit=limit)
-        with patch("core.rate_limit.asyncio.to_thread", side_effect=fake_to_thread), \
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=fake_to_thread), \
              patch("core.cache._client", mock_redis):
             client = TestClient(app)
             if method == "POST":
@@ -291,7 +291,7 @@ class TestRateLimitOverLimit:
         def terms():
             return {"terms": []}
 
-        with patch("core.rate_limit.asyncio.to_thread", side_effect=fake_to_thread), \
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=fake_to_thread), \
              patch("core.cache._client", mock_redis):
             client = TestClient(app)
             res = client.get("/api/tracked-terms")
@@ -320,7 +320,7 @@ class TestRateLimitRedisFailure:
         async def raise_error(*args, **kwargs):
             raise ConnectionError("Redis down")
 
-        with patch("core.rate_limit.asyncio.to_thread", side_effect=raise_error):
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=raise_error):
             client = TestClient(app, raise_server_exceptions=False)
             if method == "POST":
                 return client.post(path)
@@ -373,7 +373,7 @@ class TestNonIdempotentCounter:
         def recommend():
             return {"ok": True}
 
-        with patch("core.rate_limit.asyncio.to_thread", side_effect=counting_to_thread):
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=counting_to_thread):
             client = TestClient(app, raise_server_exceptions=False)
             client.post("/recommend")
 
@@ -410,7 +410,7 @@ class TestRedisKeyPrivacy:
         def recommend():
             return {"ok": True}
 
-        with patch("core.rate_limit.asyncio.to_thread", side_effect=fake_to_thread), \
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=fake_to_thread), \
              patch("core.cache._client", mock_redis):
             client = TestClient(app, headers={"X-Client-IP": raw_ip})
             client.post("/recommend")
@@ -444,7 +444,7 @@ class TestRedisKeyPrivacy:
         def recommend():
             return {"ok": True}
 
-        with patch("core.rate_limit.asyncio.to_thread", side_effect=fake_to_thread), \
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=fake_to_thread), \
              patch("core.cache._client", mock_redis), \
              patch("core.rate_limit._get_client_id", return_value="anon"):
             client = TestClient(app)
@@ -452,3 +452,107 @@ class TestRedisKeyPrivacy:
 
         assert len(captured_key) == 1
         assert "anon" in captured_key[0]
+
+
+# ── ToolExecutor protocol verification ───────────────────────────────────────
+
+class TestRateLimitToolExecutor:
+    """Verify that rate limiting uses ToolExecutor, not bare asyncio.wait_for."""
+
+    def test_rate_limit_write_policy_exists(self):
+        from core.tool_policy import TOOL_POLICIES
+        assert "rate_limit_write" in TOOL_POLICIES
+
+    def test_rate_limit_write_policy_timeout(self):
+        from core.tool_policy import get_tool_policy
+        p = get_tool_policy("rate_limit_write")
+        assert p.timeout == 0.5
+
+    def test_rate_limit_write_policy_no_retries(self):
+        from core.tool_policy import get_tool_policy
+        p = get_tool_policy("rate_limit_write")
+        assert p.retries == 0
+
+    def test_rate_limit_write_policy_not_idempotent(self):
+        from core.tool_policy import get_tool_policy
+        p = get_tool_policy("rate_limit_write")
+        assert p.idempotent is False
+
+    def test_no_direct_asyncio_wait_for_in_call(self):
+        """RateLimitMiddleware.__call__ must not call asyncio.wait_for directly."""
+        import inspect
+        from core.rate_limit import RateLimitMiddleware
+        source = inspect.getsource(RateLimitMiddleware.__call__)
+        assert "asyncio.wait_for" not in source
+
+    def test_tool_executor_execute_called_on_request(self):
+        """tool_executor.execute must be invoked for rate-limited requests."""
+        mock_redis = _make_mock_redis(count=1, ttl=55)
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        from core.rate_limit import RateLimitMiddleware, RateLimitConfig
+        config = RateLimitConfig(enabled=True, recommend_per_minute=10,
+                                  read_per_minute=60, app_env="development")
+        app = FastAPI()
+        app.add_middleware(RateLimitMiddleware, config=config)
+
+        @app.post("/recommend")
+        def recommend():
+            return {"ok": True}
+
+        from tools.tool_executor import tool_executor
+        from unittest.mock import patch as _patch
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=fake_to_thread), \
+             patch("core.cache._client", mock_redis):
+            with _patch.object(tool_executor, "execute", wraps=tool_executor.execute) as spy:
+                client = TestClient(app)
+                res = client.post("/recommend")
+                assert res.status_code == 200
+                assert spy.called, "tool_executor.execute was not called"
+                call_kwargs = spy.call_args
+                assert call_kwargs.kwargs.get("policy_name") == "rate_limit_write"
+
+    def test_tool_result_failure_prod_cost_bearing_returns_503(self):
+        """ToolResult(ok=False) on cost-bearing endpoint in production → 503."""
+        async def always_fail(*args, **kwargs):
+            raise ConnectionError("Redis down")
+
+        from core.rate_limit import RateLimitMiddleware, RateLimitConfig
+        config = RateLimitConfig(enabled=True, recommend_per_minute=10,
+                                  read_per_minute=60, app_env="production")
+        app = FastAPI()
+        app.add_middleware(RateLimitMiddleware, config=config)
+
+        @app.post("/recommend")
+        def recommend():
+            return {"ok": True}
+
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=always_fail):
+            client = TestClient(app, raise_server_exceptions=False)
+            res = client.post("/recommend")
+        assert res.status_code == 503
+
+    def test_tool_result_failure_does_not_execute_downstream(self):
+        """503 response must not reach route handler."""
+        handler_called = []
+
+        async def always_fail(*args, **kwargs):
+            raise ConnectionError("Redis down")
+
+        from core.rate_limit import RateLimitMiddleware, RateLimitConfig
+        config = RateLimitConfig(enabled=True, recommend_per_minute=10,
+                                  read_per_minute=60, app_env="production")
+        app = FastAPI()
+        app.add_middleware(RateLimitMiddleware, config=config)
+
+        @app.post("/recommend")
+        def recommend():
+            handler_called.append(True)
+            return {"ok": True}
+
+        with patch("tools.tool_executor.asyncio.to_thread", side_effect=always_fail):
+            client = TestClient(app, raise_server_exceptions=False)
+            client.post("/recommend")
+        assert not handler_called, "Route handler was executed despite 503 fail-close"

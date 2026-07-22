@@ -13,10 +13,6 @@
 
 import { NextRequest } from 'next/server';
 
-// Server-only environment variables (not NEXT_PUBLIC_)
-const BACKEND_URL = (process.env.MEAL_AGENT_BACKEND_URL ?? 'http://localhost:8000').replace(/\/+$/, '');
-const API_KEY = process.env.MEAL_AGENT_API_KEY ?? '';
-
 // Headers that must not be forwarded (hop-by-hop)
 const HOP_BY_HOP = new Set([
   'connection',
@@ -33,14 +29,59 @@ const HOP_BY_HOP = new Set([
 
 type Context = { params: Promise<{ path: string[] }> };
 
+const _503_CONFIG_ERROR = JSON.stringify({ detail: 'Service configuration error.' });
+const _502_UPSTREAM_ERROR = JSON.stringify({ detail: 'Backend service temporarily unavailable.' });
+const _JSON_HEADERS = { 'content-type': 'application/json' };
+
+/** Validate production config at request time. Returns a 503 Response on failure, null on success. */
+function _checkProductionConfig(rawBackendUrl: string, apiKey: string): Response | null {
+  if (!rawBackendUrl) {
+    console.error('[proxy] config_error=missing_backend_url');
+    return new Response(_503_CONFIG_ERROR, { status: 503, headers: _JSON_HEADERS });
+  }
+  if (!apiKey) {
+    console.error('[proxy] config_error=missing_api_key');
+    return new Response(_503_CONFIG_ERROR, { status: 503, headers: _JSON_HEADERS });
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawBackendUrl);
+  } catch {
+    console.error('[proxy] config_error=invalid_backend_url');
+    return new Response(_503_CONFIG_ERROR, { status: 503, headers: _JSON_HEADERS });
+  }
+  const host = parsed.hostname;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+    console.error('[proxy] config_error=localhost_in_production');
+    return new Response(_503_CONFIG_ERROR, { status: 503, headers: _JSON_HEADERS });
+  }
+  if (parsed.protocol !== 'https:') {
+    console.error('[proxy] config_error=non_https_in_production');
+    return new Response(_503_CONFIG_ERROR, { status: 503, headers: _JSON_HEADERS });
+  }
+  return null;
+}
+
 /** Forward a request to the Railway backend and return the response. */
 async function proxy(request: NextRequest, context: Context): Promise<Response> {
   const { path } = await context.params;
   const backendPath = '/' + path.join('/');
 
+  // Read env at request time — Route Handler is always dynamic (never statically bundled)
+  const rawBackendUrl = (process.env.MEAL_AGENT_BACKEND_URL ?? '').replace(/\/+$/, '');
+  const apiKey = process.env.MEAL_AGENT_API_KEY ?? '';
+
+  // Production fail-close: reject before making any upstream request
+  if (process.env.VERCEL_ENV === 'production') {
+    const configError = _checkProductionConfig(rawBackendUrl, apiKey);
+    if (configError) return configError;
+  }
+
+  const backendBaseUrl = rawBackendUrl || 'http://localhost:8000';
+
   // Preserve query string
   const search = request.nextUrl.search;
-  const upstreamUrl = `${BACKEND_URL}${backendPath}${search}`;
+  const upstreamUrl = `${backendBaseUrl}${backendPath}${search}`;
 
   // Extract client IP for backend rate-limit bucketing (never logged here)
   const xForwardedFor = request.headers.get('x-forwarded-for') ?? '';
@@ -53,8 +94,8 @@ async function proxy(request: NextRequest, context: Context): Promise<Response> 
       forwardHeaders.set(key, value);
     }
   });
-  if (API_KEY) {
-    forwardHeaders.set('X-API-Key', API_KEY);
+  if (apiKey) {
+    forwardHeaders.set('X-API-Key', apiKey);
   }
   if (clientIp) {
     forwardHeaders.set('X-Client-IP', clientIp);
@@ -73,11 +114,13 @@ async function proxy(request: NextRequest, context: Context): Promise<Response> 
       duplex: 'half',
       signal: request.signal,
     });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'upstream error';
-    return new Response(JSON.stringify({ detail: `Proxy error: ${msg}` }), {
+  } catch (err: unknown) {
+    // Log safe error category only — no keys, URLs, or raw error messages
+    const category = err instanceof TypeError ? 'network' : 'internal';
+    console.error(`[proxy] upstream_error category=${category} path=${backendPath}`);
+    return new Response(_502_UPSTREAM_ERROR, {
       status: 502,
-      headers: { 'content-type': 'application/json' },
+      headers: _JSON_HEADERS,
     });
   }
 
