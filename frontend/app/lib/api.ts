@@ -1,11 +1,15 @@
-const rawApiBase =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+/**
+ * All backend calls go through the same-origin Next.js Server Route Handler
+ * at /api/backend/[...path]. The Route Handler injects the server-side
+ * MEAL_AGENT_API_KEY and proxies requests to Railway.
+ *
+ * No NEXT_PUBLIC_ backend URL or API key is exposed to the browser.
+ */
 
-/** Backend base URL with any trailing slashes stripped. */
-export const API_BASE_URL = rawApiBase.replace(/\/+$/, "");
+const PROXY_BASE = '/api/backend';
 
-/** Build a full backend URL from a path (leading slash optional). */
+/** Build a proxied URL from a backend path (leading slash optional). */
 export function apiUrl(path: string): string {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${API_BASE_URL}${normalizedPath}`;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${PROXY_BASE}${normalizedPath}`;
 }

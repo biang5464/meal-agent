@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 import core.runtime_paths as _rp
 
 from core.web_config import get_allowed_origins
+from core.api_security import get_api_security_config, AuthMiddleware
+from core.rate_limit import get_rate_limit_config, RateLimitMiddleware
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +37,10 @@ from tools.price_history import (
 )
 
 load_dotenv()
+
+# Initialize security configs at startup (raises ValueError if production misconfigured)
+_AUTH_CONFIG = get_api_security_config()
+_RL_CONFIG = get_rate_limit_config()
 
 
 # ---------- 生命周期 ----------
@@ -74,6 +80,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Middleware order: last added = outermost (processes request first).
+# Request flow: AuthMiddleware → RateLimitMiddleware → CORSMiddleware → Router
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_allowed_origins(),
@@ -81,6 +89,8 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
+app.add_middleware(RateLimitMiddleware, config=_RL_CONFIG)
+app.add_middleware(AuthMiddleware, config=_AUTH_CONFIG)
 
 
 # ---------- 请求/响应模型 ----------

@@ -13,6 +13,7 @@ class ToolPolicy:
 TOOL_POLICIES: dict[str, ToolPolicy] = {
     "redis_read": ToolPolicy(timeout=0.3, retries=1),
     "redis_write": ToolPolicy(timeout=0.3, retries=0, idempotent=False),
+    "rate_limit_write": ToolPolicy(timeout=0.5, retries=0, idempotent=False),
     "chroma_search": ToolPolicy(timeout=2.0, retries=1),
     "database_read": ToolPolicy(timeout=3.0, retries=1),
     "database_write": ToolPolicy(timeout=3.0, retries=0, idempotent=False),
