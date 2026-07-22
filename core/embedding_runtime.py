@@ -35,7 +35,7 @@ def get_embedding_function():
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Embed texts via the shared model. Returns empty inner lists on failure."""
     try:
-        return list(get_embedding_function()(texts))
+        return [list(v) for v in get_embedding_function()(texts)]
     except Exception as exc:
         logger.warning("[embedding_runtime] embed_texts failed: %s", exc)
         return [[] for _ in texts]

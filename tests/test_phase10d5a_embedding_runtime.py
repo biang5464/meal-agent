@@ -216,6 +216,56 @@ class TestEmbedTexts:
         assert result == [[], []]
 
 
+# ---------- numpy EF compatibility (hotfix regression guard) ----------
+
+class TestNumpyEFCompatibility:
+    """Guard against the root-cause regression: EF returns np.ndarray, not list.
+
+    The real SentenceTransformerEmbeddingFunction returns numpy arrays.
+    embed_texts must convert them so downstream `if not vectors[i]` never hits
+    the 'truth value of an array is ambiguous' ValueError.
+    """
+
+    @pytest.fixture
+    def numpy_ef(self):
+        import numpy as np
+        from core import embedding_runtime
+
+        class _NumpyEF:
+            """Returns np.ndarray per text, matching real EF output shape."""
+            def __call__(self, texts):
+                return [np.array([float(i == hash(t) % 4) for i in range(4)]) for t in texts]
+
+        ef = _NumpyEF()
+        embedding_runtime._ef = ef
+        return ef
+
+    def test_embed_texts_converts_numpy_to_plain_list(self, numpy_ef):
+        """embed_texts must return list[list[...]] even when EF returns np.ndarray."""
+        from core.embedding_runtime import embed_texts
+        result = embed_texts(["苹果", "香蕉"])
+        assert isinstance(result, list)
+        assert all(isinstance(v, list) for v in result), (
+            "embed_texts must convert numpy arrays to plain Python lists"
+        )
+
+    def test_embed_texts_elements_support_python_truthiness(self, numpy_ef):
+        """Plain `not result[i]` must not raise ValueError (no numpy ambiguity)."""
+        from core.embedding_runtime import embed_texts
+        result = embed_texts(["苹果"])
+        _ = not result[0]   # would raise ValueError if result[0] is np.ndarray
+        _ = sum(result[0])  # plain Python numeric operations must work
+
+    def test_cosine_no_silent_zero_with_numpy_ef(self, numpy_ef):
+        """_cosine_similarity must NOT silently degrade to 0.0 when EF returns numpy arrays."""
+        from agents.context_manager import _cosine_similarity
+        result = _cosine_similarity("苹果", "苹果")
+        assert result == pytest.approx(1.0, abs=1e-6), (
+            f"cosine(x, x) with numpy EF returned {result}; "
+            "likely numpy truth-value ValueError silently caught → 0.0"
+        )
+
+
 # ---------- collection names unchanged ----------
 
 class TestCollectionNamesUnchanged:
