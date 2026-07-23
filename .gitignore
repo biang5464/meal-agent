@@ -21,6 +21,8 @@ frontend/out/
 frontend/.open-next/
 frontend/.wrangler/
 frontend/cloudflare-env.d.ts
+# Wrangler local dev secrets (written by smoke test, never committed)
+frontend/.dev.vars
 
 # Runtime databases
 data/*.db

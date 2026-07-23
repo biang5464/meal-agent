@@ -302,3 +302,85 @@ class TestGitignore:
 
     def test_cloudflare_env_dts_ignored(self):
         assert "frontend/cloudflare-env.d.ts" in _gitignore()
+
+    def test_dev_vars_ignored(self):
+        """Wrangler local-dev secrets file must be gitignored (written by smoke test)."""
+        assert "frontend/.dev.vars" in _gitignore()
+
+
+# ── Runtime smoke test script ─────────────────────────────────────────────────
+
+SMOKE_SCRIPT = FRONTEND / "scripts" / "cloudflare-runtime-smoke.mjs"
+
+
+class TestRuntimeSmokeScript:
+    def _src(self) -> str:
+        return SMOKE_SCRIPT.read_text(encoding="utf-8")
+
+    def test_script_exists(self):
+        assert SMOKE_SCRIPT.exists(), "scripts/cloudflare-runtime-smoke.mjs must exist"
+
+    def test_uses_only_node_builtins(self):
+        """Script must import only node: built-ins — zero extra npm dependencies."""
+        import re as _re
+        src = self._src()
+        imports = _re.findall(r"from ['\"]([^'\"]+)['\"]", src)
+        for imp in imports:
+            assert imp.startswith("node:"), (
+                f"Non-builtin import '{imp}' found in smoke script — only node: built-ins allowed"
+            )
+
+    def test_fake_key_not_a_real_key(self):
+        """The FAKE_KEY constant must be a clearly non-secret placeholder."""
+        src = self._src()
+        assert "runtime-smoke-test-key" in src
+        assert "FAKE_KEY" in src
+
+    def test_dev_vars_cleaned_up_in_finally(self):
+        """Script must delete .dev.vars in a finally block."""
+        src = self._src()
+        assert "finally" in src
+        assert "cleanDev" in src or "unlinkSync" in src
+
+    def test_no_real_secrets_in_script(self):
+        """Script must not contain real Railway URLs, API keys, or tokens."""
+        src = self._src()
+        forbidden = ["railway.app", "DEEPSEEK", "token_urlsafe"]
+        for term in forbidden:
+            assert term not in src, f"Forbidden term '{term}' in smoke script"
+
+    def test_covers_all_four_scenarios(self):
+        src = self._src()
+        assert "scenarioA" in src
+        assert "scenarioB" in src
+        assert "scenarioC" in src
+        assert "scenarioD" in src
+
+    def test_sse_chunk_timing_check(self):
+        """Smoke script must verify SSE chunk time-span, not just content."""
+        src = self._src()
+        assert "span" in src or "times" in src, (
+            "Script must track chunk arrival times to prove streaming vs. buffering"
+        )
+
+    def test_no_key_in_response_assertion(self):
+        """Script must assert that the API key does not appear in response bodies."""
+        src = self._src()
+        assert "noKey" in src or "FAKE_KEY" in src and "includes" in src
+
+    def test_package_script_invokes_smoke_script(self):
+        """test:cloudflare-runtime must invoke the smoke script directly (build handled inside script via ensureBuilt)."""
+        scripts = _package()["scripts"]
+        assert "test:cloudflare-runtime" in scripts
+        assert "cloudflare-runtime-smoke.mjs" in scripts["test:cloudflare-runtime"]
+
+    def test_smoke_script_has_ensure_built(self):
+        """Smoke script must call ensureBuilt() to guard the build step internally."""
+        src = self._src()
+        assert "ensureBuilt" in src, "Script must define/call ensureBuilt() to trigger build when .open-next/worker.js is absent"
+
+    def test_process_tree_killed_on_windows(self):
+        """Windows cleanup must use taskkill /F /T to kill the entire process tree."""
+        src = self._src()
+        assert "taskkill" in src
+        assert "/T" in src
