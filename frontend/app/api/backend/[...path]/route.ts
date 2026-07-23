@@ -29,6 +29,18 @@ const HOP_BY_HOP = new Set([
 
 type Context = { params: Promise<{ path: string[] }> };
 
+/**
+ * True when running in a production deployment.
+ * Checks APP_ENV (Cloudflare Workers / Railway) and VERCEL_ENV (Vercel) so the
+ * same route handler works on both platforms without platform-specific branches.
+ */
+function _isProduction(): boolean {
+  return (
+    process.env.APP_ENV === 'production' ||
+    process.env.VERCEL_ENV === 'production'
+  );
+}
+
 const _503_CONFIG_ERROR = JSON.stringify({ detail: 'Service configuration error.' });
 const _502_UPSTREAM_ERROR = JSON.stringify({ detail: 'Backend service temporarily unavailable.' });
 const _JSON_HEADERS = { 'content-type': 'application/json' };
@@ -72,7 +84,7 @@ async function proxy(request: NextRequest, context: Context): Promise<Response> 
   const apiKey = process.env.MEAL_AGENT_API_KEY ?? '';
 
   // Production fail-close: reject before making any upstream request
-  if (process.env.VERCEL_ENV === 'production') {
+  if (_isProduction()) {
     const configError = _checkProductionConfig(rawBackendUrl, apiKey);
     if (configError) return configError;
   }
