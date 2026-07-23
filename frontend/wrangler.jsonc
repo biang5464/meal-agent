@@ -2,7 +2,7 @@
   // Cloudflare Worker configuration for the Meal Agent frontend.
   // Secrets (MEAL_AGENT_BACKEND_URL, MEAL_AGENT_API_KEY) are set via
   // the Cloudflare Dashboard or `wrangler secret put` — never stored here.
-  "name": "meal-agent-frontend",
+  "name": "meal-agent-fronted",
   "main": ".open-next/worker.js",
   "compatibility_date": "2026-07-23",
   "compatibility_flags": ["nodejs_compat"],
