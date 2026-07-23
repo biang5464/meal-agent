@@ -128,14 +128,19 @@ def _has_non_negation_content(user_input: str) -> bool:
 # ── Embedding 工具函数 ──────────────────────────────────────────────────────
 
 def _cosine_similarity(text_a: str, text_b: str) -> float:
-    """用 bge-small-zh 计算两段文本的余弦相似度"""
+    """用共享 embedding runtime 计算两段文本的余弦相似度"""
     try:
-        from sentence_transformers import SentenceTransformer
         import numpy as np
-        model = SentenceTransformer("BAAI/bge-small-zh")
-        embs = model.encode([text_a, text_b])
-        a, b = embs[0], embs[1]
-        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+        from core.embedding_runtime import embed_texts
+        vectors = embed_texts([text_a, text_b])
+        if not vectors[0] or not vectors[1]:
+            return 0.0
+        a = np.array(vectors[0])
+        b = np.array(vectors[1])
+        norm_a, norm_b = np.linalg.norm(a), np.linalg.norm(b)
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+        return float(np.dot(a, b) / (norm_a * norm_b))
     except Exception:
         return 0.0
 

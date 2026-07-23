@@ -12,7 +12,6 @@ from tools.timeout_config import TimeoutConfig
 logger = logging.getLogger(__name__)
 
 import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 NUTRITION_COLLECTION = "nutrition"
@@ -28,8 +27,9 @@ _food_safety_collection: chromadb.Collection | None = None
 _food_safety_client: chromadb.ClientAPI | None = None
 
 
-def _make_ef() -> SentenceTransformerEmbeddingFunction:
-    return SentenceTransformerEmbeddingFunction(model_name=_EMBEDDING_MODEL)
+def _make_ef():
+    from core.embedding_runtime import get_embedding_function
+    return get_embedding_function()
 
 
 def init_nutrition_chroma(persist_dir: str | None = None) -> chromadb.Collection:
@@ -59,16 +59,39 @@ def init_nutrition_chroma(persist_dir: str | None = None) -> chromadb.Collection
     return _nutrition_collection
 
 
-def load_nutrition_documents(doc_dir: str, persist_dir: str | None = None) -> int:
+def load_nutrition_documents(
+    doc_dir: str,
+    persist_dir: str | None = None,
+    *,
+    replace: bool = True,
+) -> int:
     """
     加载 doc_dir 下所有 .txt 文件，切块后写入 nutrition collection。
-    先清空再重载（幂等）。返回写入的 chunk 数量。
+
+    replace=True（默认）：先清空已有数据再重载。
+    replace=False：collection 非空时直接返回 0（bootstrap 幂等模式）；
+                   collection 为空时正常加载。
+    返回写入的 chunk 数量（skip 时为 0）。
     """
     col = _nutrition_collection if _nutrition_collection is not None else init_nutrition_chroma(persist_dir)
 
-    existing = col.get(include=[])
-    if existing["ids"]:
-        col.delete(ids=existing["ids"])
+    if not replace and col.count() > 0:
+        return 0
+
+    doc_path = Path(doc_dir)
+    if not doc_path.is_dir():
+        logger.warning("[nutrition] doc_dir not found: %s — skipping load", doc_dir)
+        return 0
+
+    txt_files = sorted(doc_path.glob("*.txt"))
+    if not txt_files:
+        logger.warning("[nutrition] no .txt files in %s — skipping load", doc_dir)
+        return 0
+
+    if replace:
+        existing = col.get(include=[])
+        if existing["ids"]:
+            col.delete(ids=existing["ids"])
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
@@ -77,7 +100,7 @@ def load_nutrition_documents(doc_dir: str, persist_dir: str | None = None) -> in
     )
 
     ids, documents, metadatas = [], [], []
-    for path in sorted(Path(doc_dir).glob("*.txt")):
+    for path in txt_files:
         source = path.stem
         text = path.read_text(encoding="utf-8")
         chunks = splitter.split_text(text)
@@ -166,16 +189,39 @@ def init_food_safety_chroma(persist_dir: str | None = None) -> chromadb.Collecti
     return _food_safety_collection
 
 
-def load_food_safety_documents(doc_dir: str, persist_dir: str | None = None) -> int:
+def load_food_safety_documents(
+    doc_dir: str,
+    persist_dir: str | None = None,
+    *,
+    replace: bool = True,
+) -> int:
     """
     加载 doc_dir 下所有 .txt 文件，切块后写入 food_safety collection。
-    先清空再重载（幂等）。返回写入的 chunk 数量。
+
+    replace=True（默认）：先清空已有数据再重载。
+    replace=False：collection 非空时直接返回 0（bootstrap 幂等模式）；
+                   collection 为空时正常加载。
+    返回写入的 chunk 数量（skip 时为 0）。
     """
     col = _food_safety_collection if _food_safety_collection is not None else init_food_safety_chroma(persist_dir)
 
-    existing = col.get(include=[])
-    if existing["ids"]:
-        col.delete(ids=existing["ids"])
+    if not replace and col.count() > 0:
+        return 0
+
+    doc_path = Path(doc_dir)
+    if not doc_path.is_dir():
+        logger.warning("[food_safety] doc_dir not found: %s — skipping load", doc_dir)
+        return 0
+
+    txt_files = sorted(doc_path.glob("*.txt"))
+    if not txt_files:
+        logger.warning("[food_safety] no .txt files in %s — skipping load", doc_dir)
+        return 0
+
+    if replace:
+        existing = col.get(include=[])
+        if existing["ids"]:
+            col.delete(ids=existing["ids"])
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
@@ -188,7 +234,7 @@ def load_food_safety_documents(doc_dir: str, persist_dir: str | None = None) -> 
     }
 
     ids, documents, metadatas = [], [], []
-    for path in sorted(Path(doc_dir).glob("*.txt")):
+    for path in txt_files:
         source = _SOURCE_ALIAS.get(path.stem, path.stem)
         text = path.read_text(encoding="utf-8")
         chunks = splitter.split_text(text)

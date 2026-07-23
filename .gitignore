@@ -17,6 +17,13 @@ frontend/node_modules/
 frontend/.next/
 frontend/out/
 
+# Cloudflare / OpenNext build artifacts
+frontend/.open-next/
+frontend/.wrangler/
+frontend/cloudflare-env.d.ts
+# Wrangler local dev secrets (written by smoke test, never committed)
+frontend/.dev.vars
+
 # Runtime databases
 data/*.db
 data/*.sqlite

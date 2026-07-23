@@ -1,0 +1,59 @@
+# ── Version control ────────────────────────────────────────────────────────────
+.git
+.github
+
+# ── Secrets and local config ───────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+# .env.example is intentionally kept (documents required variables)
+
+# ── Python virtual environments and cache ─────────────────────────────────────
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.pyo
+
+# ── Test artefacts ────────────────────────────────────────────────────────────
+.pytest_cache
+.coverage
+htmlcov
+tests/
+# Root-level ad-hoc test scripts (not part of production app)
+test.py
+test_*.py
+pytest.ini
+requirements-dev.txt
+
+# ── Runtime writable data ─────────────────────────────────────────────────────
+# These go on the Railway Volume at /app/runtime-data, not in the image.
+# data/nutrition/ and data/food_safety/ are committed seed docs and must be
+# included — do NOT add a blanket data/ exclusion here.
+data/chroma/
+data/test_chroma/
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/huggingface/
+
+# ── Log files ─────────────────────────────────────────────────────────────────
+*.log
+uvicorn.log
+uvicorn.err
+
+# ── Frontend (deployed separately to Vercel) ───────────────────────────────────
+frontend/
+
+# ── Editor and tooling ────────────────────────────────────────────────────────
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Temp files ────────────────────────────────────────────────────────────────
+tmp/
+temp/
+*.tmp

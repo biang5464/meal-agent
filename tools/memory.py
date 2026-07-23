@@ -196,13 +196,15 @@ _PERMANENT_KEYWORDS = [
     "肾病", "心脏病", "高血脂", "乳糖不耐", "麸质过敏"
 ]
 
-_CHROMA_PATH = "./data/chroma"
+def _get_chroma_path() -> str:
+    return os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
+
 _MEMORY_COLLECTION = "conversation_memory"
 
 
 def init_conversation_memory_chroma():
     """初始化 conversation_memory collection"""
-    client = chromadb.PersistentClient(path=_CHROMA_PATH)
+    client = chromadb.PersistentClient(path=_get_chroma_path())
     client.get_or_create_collection(name=_MEMORY_COLLECTION)
     print("conversation_memory collection 初始化完成")
 
@@ -268,7 +270,7 @@ async def save_conversation_memory(
             else (now + timedelta(days=90)).strftime("%Y-%m-%d")
         )
 
-        client = chromadb.PersistentClient(path=_CHROMA_PATH)
+        client = chromadb.PersistentClient(path=_get_chroma_path())
         collection = client.get_or_create_collection(name=_MEMORY_COLLECTION)
 
         doc_id = f"{user_id}_{now.strftime('%Y%m%d%H%M%S%f')}"
@@ -296,7 +298,7 @@ def search_conversation_memory(user_id: str, query: str, n_results: int = 3) -> 
     """
     try:
         from datetime import date
-        client = chromadb.PersistentClient(path=_CHROMA_PATH)
+        client = chromadb.PersistentClient(path=_get_chroma_path())
         collection = client.get_or_create_collection(name=_MEMORY_COLLECTION)
 
         # 多取一些，后面重排序
@@ -351,7 +353,7 @@ def cleanup_expired_conversation_memory():
     清理过期的 temporary 记录（由 maintenance_agent 每天凌晨调用）。
     """
     try:
-        client = chromadb.PersistentClient(path=_CHROMA_PATH)
+        client = chromadb.PersistentClient(path=_get_chroma_path())
         collection = client.get_or_create_collection(name=_MEMORY_COLLECTION)
 
         today = datetime.now().strftime("%Y-%m-%d")
@@ -381,7 +383,7 @@ def _search_conversation_memory_impl(user_id: str, query: str, n_results: int) -
     from datetime import date
 
     try:
-        client = chromadb.PersistentClient(path=_CHROMA_PATH)
+        client = chromadb.PersistentClient(path=_get_chroma_path())
         collection = client.get_collection(name=_MEMORY_COLLECTION)
     except Exception as exc:
         raise ConnectionError(f"conversation_memory collection 未就绪: {exc}") from exc

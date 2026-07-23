@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-
-const API_BASE = 'http://localhost:8000';
+import { apiUrl } from '../lib/api';
 
 type Dish = {
   name: string;
@@ -59,7 +58,7 @@ export default function DailyRecommendation({ userId, onClose }: Props) {
     setError(null);
     try {
       const res = await fetch(
-        `${API_BASE}/api/daily-recommendation?user_id=${encodeURIComponent(userId)}&meal_type=${type}`,
+        apiUrl(`/api/daily-recommendation?user_id=${encodeURIComponent(userId)}&meal_type=${type}`),
       );
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -82,7 +81,7 @@ export default function DailyRecommendation({ userId, onClose }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/daily-recommendation/generate`, {
+      const res = await fetch(apiUrl('/api/daily-recommendation/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, meal_type: mealType }),

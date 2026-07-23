@@ -471,7 +471,11 @@ async def _daily_maintenance() -> None:
 
 
 def start_scheduler() -> None:
-    """在 FastAPI lifespan 启动时调用。"""
+    """在 FastAPI lifespan 启动时调用。重复调用安全（已运行则直接返回）。"""
+    if scheduler.running:
+        logger.info("Scheduler already running, skipping duplicate start.")
+        return
+
     from apscheduler.triggers.cron import CronTrigger
     from tools.memory import cleanup_expired_conversation_memory
 
