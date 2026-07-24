@@ -190,6 +190,10 @@ class TestWranglerConfig:
     def test_name_is_meal_agent_fronted(self):
         assert self._parsed()["name"] == "meal-agent-fronted"
 
+    def test_keep_vars_is_true(self):
+        """keep_vars must be set so wrangler deploy does not wipe Dashboard env vars."""
+        assert self._parsed()["keep_vars"] is True
+
     def test_main_is_open_next_worker(self):
         assert self._parsed()["main"] == ".open-next/worker.js"
 
