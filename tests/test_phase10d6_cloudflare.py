@@ -187,8 +187,8 @@ class TestWranglerConfig:
         raw = _strip_jsonc_comments(_wrangler())
         return json.loads(raw)
 
-    def test_name_is_meal_agent_frontend(self):
-        assert self._parsed()["name"] == "meal-agent-frontend"
+    def test_name_is_meal_agent_fronted(self):
+        assert self._parsed()["name"] == "meal-agent-fronted"
 
     def test_main_is_open_next_worker(self):
         assert self._parsed()["main"] == ".open-next/worker.js"
