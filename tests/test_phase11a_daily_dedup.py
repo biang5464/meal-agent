@@ -9,10 +9,13 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agents.daily_recommendation_agent import (
     _filter_recipes,
     _get_recent_dishes,
     _get_same_day_dishes,
+    _rule_fallback,
 )
 
 # ── 测试用菜谱数据 ────────────────────────────────────────────────────────────
@@ -220,3 +223,85 @@ class TestFallbackLevelLogic:
             for dish in same_day:
                 assert dish not in _names(level), \
                     f"同天菜 '{dish}' 出现在 {level_name}，违反跨餐去重约束"
+
+
+# ── 15-19: 审计补充场景 ───────────────────────────────────────────────────────
+
+class TestAuditScenarios:
+    """Phase 11A Final Audit 补充测试，覆盖五个未显式测试的场景。"""
+
+    # 场景 3a：_rule_fallback 候选不足 n 道时，返回现有全部，不崩溃、不补位
+    def test_rule_fallback_fewer_items_than_n_returns_all(self):
+        """候选只有 2 道时，_rule_fallback(n=3) 返回 2 道，不尝试补到 3 道。"""
+        pool = RECIPES[:2]
+        result = _rule_fallback(pool, n=3)
+        assert len(result) == 2
+        assert all(r["name"] in _names(pool) for r in result)
+
+    # 场景 3b：fallback level 3 路径 — 同天约束仍在，结果可 <3 道
+    def test_fallback_level3_excludes_same_day_with_fewer_dishes(self):
+        """hard_base 只剩 2 道时，同天约束仍不放宽，返回值为这 2 道（不补充同天菜）。"""
+        # 把前 6 道菜列为同天约束，仅剩后 2 道（干煸四季豆、白灼虾）
+        same_day = _names(RECIPES[:6])
+        after_safety = _filter_recipes(RECIPES)
+        hard_base    = _filter_recipes(after_safety, same_day_dishes=same_day)
+
+        assert len(hard_base) == 2, f"期望 hard_base=2，实际 {len(hard_base)}"
+        for r in hard_base:
+            assert r["name"] not in same_day, \
+                f"同天菜 '{r['name']}' 出现在 hard_base，违反约束"
+
+    # 场景 5a：忌口食材在所有降级层级不放宽
+    def test_dislikes_persist_through_all_fallback_levels(self):
+        """忌口食材（五花肉→红烧肉）在 lv0/lv1/lv2 中均不出现。"""
+        after_safety = _filter_recipes(RECIPES, dislikes=["五花肉"])
+        hard_base    = _filter_recipes(after_safety, same_day_dishes=[])
+        lv0 = _filter_recipes(hard_base, budget="high", recent_dishes=["清蒸鲈鱼"])
+        lv1 = _filter_recipes(hard_base, budget="high")
+        lv2 = hard_base
+
+        for level_name, level in [("lv0", lv0), ("lv1", lv1), ("lv2", lv2)]:
+            for r in level:
+                assert "五花肉" not in r.get("ingredients", []), \
+                    f"忌口食材五花肉（红烧肉）出现在 {level_name}"
+
+    # 场景 5b：饮食限制关键词在所有降级层级不放宽
+    def test_restrictions_persist_through_all_fallback_levels(self):
+        """饮食限制'辣'（麻婆豆腐、干煸四季豆）在 lv0/lv1/lv2 中均不出现。"""
+        after_safety = _filter_recipes(RECIPES, restrictions=["辣"])
+        hard_base    = _filter_recipes(after_safety, same_day_dishes=[])
+        lv0 = _filter_recipes(hard_base, budget="low", recent_dishes=["番茄炒蛋"])
+        lv1 = _filter_recipes(hard_base, budget="low")
+        lv2 = hard_base
+
+        restricted = ["麻婆豆腐", "干煸四季豆"]
+        for level_name, level in [("lv0", lv0), ("lv1", lv1), ("lv2", lv2)]:
+            for name in restricted:
+                assert name not in _names(level), \
+                    f"饮食限制菜品 '{name}' 出现在 {level_name}"
+
+    # 场景 7：Scheduler 对每个用户依次生成 lunch 再 dinner（保证 dinner 能看到 lunch 数据）
+    @pytest.mark.asyncio
+    async def test_scheduler_sequential_lunch_then_dinner(self):
+        """generate_daily_recommendations 对每个用户按 lunch→dinner 顺序调用 generate_for_user。"""
+        from agents.daily_recommendation_agent import generate_daily_recommendations
+
+        call_log: list[tuple[str, str]] = []
+
+        async def spy(uid, meal_type, date_str, generated_by="scheduled"):
+            call_log.append((uid, meal_type))
+
+        mock_session = MagicMock()
+        mock_session.query.return_value.all.return_value = [("u1",), ("u2",)]
+
+        with (
+            patch("agents.daily_recommendation_agent._session") as mock_ctx,
+            patch("agents.daily_recommendation_agent.generate_for_user", side_effect=spy),
+        ):
+            mock_ctx.return_value.__enter__.return_value = mock_session
+            await generate_daily_recommendations()
+
+        for uid in ("u1", "u2"):
+            user_calls = [meal for u, meal in call_log if u == uid]
+            assert user_calls == ["lunch", "dinner"], \
+                f"user={uid} 期望 ['lunch','dinner']，实际 {user_calls}"
