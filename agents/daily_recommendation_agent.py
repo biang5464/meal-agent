@@ -34,15 +34,17 @@ def _filter_recipes(
     restrictions: list[str] | None = None,
     budget: str = "",
     recent_dishes: list[str] | None = None,
+    same_day_dishes: list[str] | None = None,
 ) -> list[dict]:
     """
     过滤菜谱：
-    - 硬过滤：忌口食材（dislikes）、饮食限制关键词（restrictions）
+    - 硬过滤：忌口食材（dislikes）、饮食限制关键词（restrictions）、同天另一餐（same_day_dishes，永不放宽）
     - 软过滤：预算档位（budget）、近期去重（recent_dishes）
     """
     dislikes     = [d.strip() for d in (dislikes or [])     if d.strip()]
     restrictions = [r.strip() for r in (restrictions or []) if r.strip()]
     recent       = set(recent_dishes or [])
+    same_day     = set(same_day_dishes or [])
 
     result = []
     for r in recipes:
@@ -59,6 +61,10 @@ def _filter_recipes(
             rk in ingredients_str or rk in flavor or rk in steps
             for rk in restrictions
         ):
+            continue
+
+        # 硬过滤：同天另一餐菜（永不放宽，防止午晚餐重复）
+        if r.get("name") in same_day:
             continue
 
         # 软过滤：预算档位（unknown 视为可接受任何预算）
@@ -209,8 +215,8 @@ def _get_user_profile(user_id: str) -> dict:
         return {}
 
 
-def _get_recent_dishes(user_id: str, days: int = 7) -> list[str]:
-    """获取用户最近 N 天已推荐的菜名。"""
+def _get_recent_dishes(user_id: str, days: int = 7) -> tuple[list[str], str]:
+    """获取用户最近 N 天已推荐的菜名。返回 (names, status)。"""
     since = date.today() - timedelta(days=days)
     try:
         with _session() as session:
@@ -226,9 +232,32 @@ def _get_recent_dishes(user_id: str, days: int = 7) -> list[str]:
         for row in rows:
             if row.dishes:
                 names.extend(d.get("name", "") for d in row.dishes)
-        return names
+        return names, ("success" if names else "empty")
     except Exception:
-        return []
+        return [], "read_degraded"
+
+
+def _get_same_day_dishes(user_id: str, today: date, meal_type: str) -> tuple[list[str], str]:
+    """查询同天另一餐的已推荐菜名，用于跨餐硬约束去重。返回 (names, status)。"""
+    other_meal = "dinner" if meal_type == "lunch" else "lunch"
+    try:
+        with _session() as session:
+            rows = (
+                session.query(DailyRecommendationORM)
+                .filter(
+                    DailyRecommendationORM.user_id == user_id,
+                    DailyRecommendationORM.date == today,
+                    DailyRecommendationORM.meal_type == other_meal,
+                )
+                .all()
+            )
+        names: list[str] = []
+        for row in rows:
+            if row.dishes:
+                names.extend(d.get("name", "") for d in row.dishes)
+        return names, ("success" if names else "empty")
+    except Exception:
+        return [], "read_degraded"
 
 
 def _orm_to_dict(rec: DailyRecommendationORM) -> dict:
@@ -282,56 +311,63 @@ async def generate_for_user(
     diet_restriction = profile.get("diet_restriction", "") or ""
     restrictions = [kw for kw in diet_restriction.replace("，", ",").split(",") if kw.strip()]
 
-    # 全量菜谱 + 最近7天去重
-    all_recipes  = get_all_recipes()
-    recent_dishes = _get_recent_dishes(user_id, days=7)
+    # 全量菜谱
+    all_recipes = get_all_recipes()
 
-    # 过滤（硬+软）
-    filtered = _filter_recipes(
-        all_recipes,
-        dislikes=dislikes,
-        restrictions=restrictions,
-        budget=budget,
-        recent_dishes=recent_dishes,
+    # 同天另一餐的菜（硬约束，永不放宽）
+    same_day_dishes, same_day_status = _get_same_day_dishes(user_id, today, meal_type)
+
+    # 最近7天已推荐菜（软约束，可放宽）
+    recent_dishes, history_read_status = _get_recent_dishes(user_id, days=7)
+
+    # 硬约束基础集：dislikes + restrictions + same_day（三者均不可放宽）
+    after_safety = _filter_recipes(
+        all_recipes, dislikes=dislikes, restrictions=restrictions,
     )
-    source_status = "success"
+    hard_base = _filter_recipes(after_safety, same_day_dishes=same_day_dishes)
 
-    # 软过滤结果太少时放宽：去掉近期去重
-    if len(filtered) < 3:
-        filtered_no_recent = _filter_recipes(
-            all_recipes,
-            dislikes=dislikes,
-            restrictions=restrictions,
-            budget=budget,
-        )
-        if len(filtered_no_recent) >= len(filtered):
-            filtered = filtered_no_recent
-            source_status = "partial"
+    # 软约束层叠，逐级放宽
+    lv0 = _filter_recipes(hard_base, budget=budget, recent_dishes=recent_dishes)
+    lv1 = _filter_recipes(hard_base, budget=budget)   # 放宽 7-day 历史
+    lv2 = hard_base                                    # 放宽预算 + 历史
 
-    # 仍然不足时，只保留硬过滤
-    if len(filtered) < 3:
-        filtered_hard = _filter_recipes(
-            all_recipes,
-            dislikes=dislikes,
-            restrictions=restrictions,
-        )
-        if filtered_hard:
-            filtered = filtered_hard
-            source_status = "fallback"
+    # 诊断用：仅去近期（不含预算）
+    after_recent = _filter_recipes(hard_base, recent_dishes=recent_dishes)
 
-    # 全部被过滤时使用全量兜底
-    if not filtered:
-        filtered = all_recipes
-        source_status = "fallback"
+    # 选择最优 level（same_day 约束在所有 level 中均已应用）
+    if len(lv0) >= 3:
+        filtered, fallback_level, source_status = lv0, 0, "success"
+    elif len(lv1) >= 3:
+        filtered, fallback_level, source_status = lv1, 1, "partial"
+    elif len(lv2) >= 3:
+        filtered, fallback_level, source_status = lv2, 2, "fallback"
+    else:
+        # 硬约束后候选不足3道，使用现有候选（不引入同天菜）
+        filtered, fallback_level, source_status = lv2, 3, "fallback"
+
+    logger.info(
+        "[daily_rec] user=%s meal=%s date=%s "
+        "total_candidates=%d after_safety=%d after_same_day=%d after_recent=%d "
+        "selected_count=%d fallback_level=%d source_status=%s "
+        "history_status=%s same_day_status=%s",
+        user_id, meal_type, today.isoformat(),
+        len(all_recipes), len(after_safety), len(hard_base), len(after_recent),
+        len(filtered), fallback_level, source_status,
+        history_read_status, same_day_status,
+    )
 
     # 选菜
     if len(filtered) >= 3:
         selected = _select_by_structure(filtered)
     else:
-        selected = _rule_fallback(filtered)
+        selected = _rule_fallback(filtered) if filtered else []
 
     if not selected:
-        selected = random.sample(all_recipes, min(3, len(all_recipes)))
+        if hard_base:
+            selected = _rule_fallback(hard_base, n=min(3, len(hard_base)))
+        else:
+            logger.warning("[daily_rec] 硬约束后无候选 user=%s meal=%s", user_id, meal_type)
+            return None
 
     # LLM 推理
     reasoning = await _generate_reasoning(selected, profile, meal_type)
