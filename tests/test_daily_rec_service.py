@@ -105,7 +105,8 @@ async def test_generate_for_user_integrity_error_returns_existing():
     with (
         patch("agents.daily_recommendation_agent._session", side_effect=_session_factory),
         patch("agents.daily_recommendation_agent._get_user_profile", return_value={}),
-        patch("agents.daily_recommendation_agent._get_recent_dishes", return_value=[]),
+        patch("agents.daily_recommendation_agent._get_same_day_dishes", return_value=([], "empty")),
+        patch("agents.daily_recommendation_agent._get_recent_dishes", return_value=([], "empty")),
         patch("agents.daily_recommendation_agent.get_all_recipes", return_value=_RECIPES),
         patch("agents.daily_recommendation_agent._generate_reasoning",
               new=AsyncMock(return_value="{}")),
@@ -126,7 +127,8 @@ async def test_generate_for_user_db_write_fail_raises():
     with (
         patch("agents.daily_recommendation_agent._session", return_value=mock_session),
         patch("agents.daily_recommendation_agent._get_user_profile", return_value={}),
-        patch("agents.daily_recommendation_agent._get_recent_dishes", return_value=[]),
+        patch("agents.daily_recommendation_agent._get_same_day_dishes", return_value=([], "empty")),
+        patch("agents.daily_recommendation_agent._get_recent_dishes", return_value=([], "empty")),
         patch("agents.daily_recommendation_agent.get_all_recipes", return_value=_RECIPES_MEAT),
         patch("agents.daily_recommendation_agent._generate_reasoning",
               new=AsyncMock(return_value="{}")),
