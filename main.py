@@ -249,7 +249,13 @@ async def get_daily_recommendation(
                 "created_at":   rec.created_at.isoformat() if rec.created_at else None,
             }
 
-    result = await generate_for_user(user_id, meal_type=meal_type, date_str=target_date, generated_by="lazy")
+    from agents.daily_recommendation_agent import LockBusy, LockDegraded
+    try:
+        result = await generate_for_user(user_id, meal_type=meal_type, date_str=target_date, generated_by="lazy")
+    except LockBusy:
+        raise HTTPException(status_code=503, detail="推荐生成繁忙，请稍后重试")
+    except LockDegraded:
+        raise HTTPException(status_code=503, detail="服务暂时不可用，请稍后重试")
     if result is None:
         raise HTTPException(status_code=500, detail="推荐生成失败，请稍后重试")
     return result
@@ -268,7 +274,13 @@ async def trigger_daily_recommendation(payload: dict):
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id 不能为空")
 
-    result = await generate_for_user(user_id, meal_type=meal_type, generated_by="manual")
+    from agents.daily_recommendation_agent import LockBusy, LockDegraded
+    try:
+        result = await generate_for_user(user_id, meal_type=meal_type, generated_by="manual")
+    except LockBusy:
+        raise HTTPException(status_code=503, detail="推荐生成繁忙，请稍后重试")
+    except LockDegraded:
+        raise HTTPException(status_code=503, detail="服务暂时不可用，请稍后重试")
     if result is None:
         raise HTTPException(status_code=500, detail="推荐生成失败，请稍后重试")
     return result
