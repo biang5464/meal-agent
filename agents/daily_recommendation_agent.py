@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import random
+import secrets
+import time
 from datetime import date, datetime, timedelta
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -24,6 +27,59 @@ VEGGIE_CATEGORIES    = {"蔬菜", "半荤素", "素菜", "豆腐"}
 SOUP_CATEGORIES      = {"汤", "副菜", "轻食", "粥"}
 
 _RETRY_QUEUE_KEY = "daily_rec_retry_queue"
+
+_LOCK_TTL = 180          # lock TTL in seconds; covers LLM timeout (60s) + full generation margin
+_LOCK_WAIT_TIMEOUT = 12  # max seconds to poll for lock acquisition
+_LOCK_POLL_INTERVAL = 3  # seconds between poll attempts
+
+_LUA_RELEASE = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end
+"""
+
+
+class LockBusy(Exception):
+    """Lock held by another request; wait timeout elapsed."""
+
+
+class LockDegraded(Exception):
+    """Redis unavailable when distributed lock is required for generation."""
+
+
+async def _try_acquire_lock(lock_key: str, token: str):
+    """Single SET NX attempt. Returns ToolResult: data=True if acquired, data=None if busy."""
+    from core.cache import _client as _redis_client
+    from tools.tool_executor import tool_executor
+
+    def _set_nx(k, t):
+        return _redis_client.set(k, t, nx=True, ex=_LOCK_TTL)
+
+    return await tool_executor.execute(
+        _set_nx, lock_key, token,
+        policy_name="redis_write",
+        tool_name="acquire_daily_rec_lock",
+    )
+
+
+async def _release_daily_rec_lock(lock_key: str, token: str) -> None:
+    """CAS-delete the lock only if our token still matches (prevents releasing another request's lock)."""
+    from core.cache import _client as _redis_client
+    from tools.tool_executor import tool_executor
+
+    def _cas_del(k, t):
+        return _redis_client.eval(_LUA_RELEASE, 1, k, t)
+
+    try:
+        await tool_executor.execute(
+            _cas_del, lock_key, token,
+            policy_name="redis_write",
+            tool_name="release_daily_rec_lock",
+        )
+    except Exception as e:
+        logger.warning("[daily_rec] lock release failed key=%s: %s", lock_key, e)
 
 
 # ── 核心过滤 ───────────────────────────────────────────────────────────────────
@@ -289,8 +345,9 @@ async def generate_for_user(
     from sqlalchemy.exc import IntegrityError
 
     today = date.fromisoformat(date_str) if date_str else date.today()
+    today_str = today.isoformat()
 
-    # 幂等检查
+    # 幂等检查（无锁快速路径）
     with _session() as session:
         existing = (
             session.query(DailyRecommendationORM)
@@ -304,106 +361,43 @@ async def generate_for_user(
         if existing:
             return _orm_to_dict(existing)
 
-    # 用户画像
-    profile = _get_user_profile(user_id)
-    dislikes = profile.get("dislikes", [])
-    budget   = profile.get("budget", "")
-    diet_restriction = profile.get("diet_restriction", "") or ""
-    restrictions = [kw for kw in diet_restriction.replace("，", ",").split(",") if kw.strip()]
-
-    # 全量菜谱
-    all_recipes = get_all_recipes()
-
-    # 同天另一餐的菜（硬约束，永不放宽）
-    same_day_dishes, same_day_status = _get_same_day_dishes(user_id, today, meal_type)
-
-    # 最近7天已推荐菜（软约束，可放宽）
-    recent_dishes, history_read_status = _get_recent_dishes(user_id, days=7)
-
-    # 硬约束基础集：dislikes + restrictions + same_day（三者均不可放宽）
-    after_safety = _filter_recipes(
-        all_recipes, dislikes=dislikes, restrictions=restrictions,
-    )
-    hard_base = _filter_recipes(after_safety, same_day_dishes=same_day_dishes)
-
-    # 软约束层叠，逐级放宽
-    lv0 = _filter_recipes(hard_base, budget=budget, recent_dishes=recent_dishes)
-    lv1 = _filter_recipes(hard_base, budget=budget)   # 放宽 7-day 历史
-    lv2 = hard_base                                    # 放宽预算 + 历史
-
-    # 诊断用：仅去近期（不含预算）
-    after_recent = _filter_recipes(hard_base, recent_dishes=recent_dishes)
-
-    # 选择最优 level（same_day 约束在所有 level 中均已应用）
-    if len(lv0) >= 3:
-        filtered, fallback_level, source_status = lv0, 0, "success"
-    elif len(lv1) >= 3:
-        filtered, fallback_level, source_status = lv1, 1, "partial"
-    elif len(lv2) >= 3:
-        filtered, fallback_level, source_status = lv2, 2, "fallback"
-    else:
-        # 硬约束后候选不足3道，使用现有候选（不引入同天菜）
-        filtered, fallback_level, source_status = lv2, 3, "fallback"
-
-    logger.info(
-        "[daily_rec] user=%s meal=%s date=%s "
-        "total_candidates=%d after_safety=%d after_same_day=%d after_recent=%d "
-        "selected_count=%d fallback_level=%d source_status=%s "
-        "history_status=%s same_day_status=%s",
-        user_id, meal_type, today.isoformat(),
-        len(all_recipes), len(after_safety), len(hard_base), len(after_recent),
-        len(filtered), fallback_level, source_status,
-        history_read_status, same_day_status,
-    )
-
-    # 选菜
-    if len(filtered) >= 3:
-        selected = _select_by_structure(filtered)
-    else:
-        selected = _rule_fallback(filtered) if filtered else []
-
-    if not selected:
-        if hard_base:
-            selected = _rule_fallback(hard_base, n=min(3, len(hard_base)))
-        else:
-            logger.warning("[daily_rec] 硬约束后无候选 user=%s meal=%s", user_id, meal_type)
-            return None
-
-    # LLM 推理
-    reasoning = await _generate_reasoning(selected, profile, meal_type)
-
-    # 构建 dishes 数据
-    dishes_data = [
-        {
-            "name":        r.get("name"),
-            "category":    r.get("category"),
-            "ingredients": r.get("ingredients", []),
-            "cuisine":     r.get("cuisine"),
-            "flavor":      r.get("flavor"),
-            "budget_tier": r.get("budget_tier"),
-        }
-        for r in selected
-    ]
-
-    rec = DailyRecommendationORM(
-        user_id=user_id,
-        date=today,
-        meal_type=meal_type,
-        dishes=dishes_data,
-        reasoning=reasoning,
-        generated_by=generated_by,
-        source_status=source_status,
-        is_read=0,
-    )
+    # 分布式锁（按 user_id+date 粒度，覆盖午晚两餐，防止并发生成导致跨餐重复）
+    lock_key = f"daily_rec_lock:{user_id}:{today_str}"
+    token = secrets.token_urlsafe(16)
+    deadline = time.monotonic() + _LOCK_WAIT_TIMEOUT
+    lock_acquired = False
 
     try:
-        with _session() as session:
-            session.add(rec)
-            session.commit()
-            session.refresh(rec)
-            return _orm_to_dict(rec)
-    except IntegrityError:
-        logger.info("[daily_rec] 并发冲突，user=%s meal=%s 已存在，返回已有记录", user_id, meal_type)
+        while True:
+            acquire_result = await _try_acquire_lock(lock_key, token)
+            if not acquire_result.ok:
+                raise LockDegraded(
+                    f"Redis unavailable when acquiring lock for {user_id}/{today_str}: {acquire_result.error}"
+                )
+            if acquire_result.data is True:
+                lock_acquired = True
+                break
+            # 锁被占用：检查当前 meal_type 是否已生成，已生成则提前返回
+            with _session() as session:
+                existing = (
+                    session.query(DailyRecommendationORM)
+                    .filter(
+                        DailyRecommendationORM.user_id == user_id,
+                        DailyRecommendationORM.date == today,
+                        DailyRecommendationORM.meal_type == meal_type,
+                    )
+                    .first()
+                )
+                if existing:
+                    return _orm_to_dict(existing)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LockBusy(
+                    f"Lock busy for {user_id}/{today_str}/{meal_type} after {_LOCK_WAIT_TIMEOUT}s"
+                )
+            await asyncio.sleep(min(_LOCK_POLL_INTERVAL, remaining))
+
+        # 获得锁后再次确认幂等（等待期间另一个请求可能已写入）
         with _session() as session:
             existing = (
                 session.query(DailyRecommendationORM)
@@ -414,10 +408,126 @@ async def generate_for_user(
                 )
                 .first()
             )
-            return _orm_to_dict(existing) if existing else None
-    except Exception as e:
-        logger.error("[daily_rec] 写入失败 user=%s: %s", user_id, e)
-        raise  # 向上传播，使 generate_daily_recommendations 可触发 _enqueue_retry_result
+            if existing:
+                return _orm_to_dict(existing)
+
+        # 用户画像
+        profile = _get_user_profile(user_id)
+        dislikes = profile.get("dislikes", [])
+        budget   = profile.get("budget", "")
+        diet_restriction = profile.get("diet_restriction", "") or ""
+        restrictions = [kw for kw in diet_restriction.replace("，", ",").split(",") if kw.strip()]
+
+        # 全量菜谱
+        all_recipes = get_all_recipes()
+
+        # 同天另一餐的菜（硬约束，永不放宽）- 在锁内读取，确保看到最新写入
+        same_day_dishes, same_day_status = _get_same_day_dishes(user_id, today, meal_type)
+
+        # 最近7天已推荐菜（软约束，可放宽）
+        recent_dishes, history_read_status = _get_recent_dishes(user_id, days=7)
+
+        # 硬约束基础集：dislikes + restrictions + same_day（三者均不可放宽）
+        after_safety = _filter_recipes(
+            all_recipes, dislikes=dislikes, restrictions=restrictions,
+        )
+        hard_base = _filter_recipes(after_safety, same_day_dishes=same_day_dishes)
+
+        # 软约束层叠，逐级放宽
+        lv0 = _filter_recipes(hard_base, budget=budget, recent_dishes=recent_dishes)
+        lv1 = _filter_recipes(hard_base, budget=budget)   # 放宽 7-day 历史
+        lv2 = hard_base                                    # 放宽预算 + 历史
+
+        # 诊断用：仅去近期（不含预算）
+        after_recent = _filter_recipes(hard_base, recent_dishes=recent_dishes)
+
+        # 选择最优 level（same_day 约束在所有 level 中均已应用）
+        if len(lv0) >= 3:
+            filtered, fallback_level, source_status = lv0, 0, "success"
+        elif len(lv1) >= 3:
+            filtered, fallback_level, source_status = lv1, 1, "partial"
+        elif len(lv2) >= 3:
+            filtered, fallback_level, source_status = lv2, 2, "fallback"
+        else:
+            filtered, fallback_level, source_status = lv2, 3, "fallback"
+
+        logger.info(
+            "[daily_rec] user=%s meal=%s date=%s "
+            "total_candidates=%d after_safety=%d after_same_day=%d after_recent=%d "
+            "selected_count=%d fallback_level=%d source_status=%s "
+            "history_status=%s same_day_status=%s",
+            user_id, meal_type, today.isoformat(),
+            len(all_recipes), len(after_safety), len(hard_base), len(after_recent),
+            len(filtered), fallback_level, source_status,
+            history_read_status, same_day_status,
+        )
+
+        # 选菜
+        if len(filtered) >= 3:
+            selected = _select_by_structure(filtered)
+        else:
+            selected = _rule_fallback(filtered) if filtered else []
+
+        if not selected:
+            if hard_base:
+                selected = _rule_fallback(hard_base, n=min(3, len(hard_base)))
+            else:
+                logger.warning("[daily_rec] 硬约束后无候选 user=%s meal=%s", user_id, meal_type)
+                return None
+
+        # LLM 推理
+        reasoning = await _generate_reasoning(selected, profile, meal_type)
+
+        # 构建 dishes 数据
+        dishes_data = [
+            {
+                "name":        r.get("name"),
+                "category":    r.get("category"),
+                "ingredients": r.get("ingredients", []),
+                "cuisine":     r.get("cuisine"),
+                "flavor":      r.get("flavor"),
+                "budget_tier": r.get("budget_tier"),
+            }
+            for r in selected
+        ]
+
+        rec = DailyRecommendationORM(
+            user_id=user_id,
+            date=today,
+            meal_type=meal_type,
+            dishes=dishes_data,
+            reasoning=reasoning,
+            generated_by=generated_by,
+            source_status=source_status,
+            is_read=0,
+        )
+
+        try:
+            with _session() as session:
+                session.add(rec)
+                session.commit()
+                session.refresh(rec)
+                return _orm_to_dict(rec)
+        except IntegrityError:
+            logger.info("[daily_rec] 并发冲突，user=%s meal=%s 已存在，返回已有记录", user_id, meal_type)
+            with _session() as session:
+                existing = (
+                    session.query(DailyRecommendationORM)
+                    .filter(
+                        DailyRecommendationORM.user_id == user_id,
+                        DailyRecommendationORM.date == today,
+                        DailyRecommendationORM.meal_type == meal_type,
+                    )
+                    .first()
+                )
+                return _orm_to_dict(existing) if existing else None
+        except Exception as e:
+            logger.error("[daily_rec] 写入失败 user=%s: %s", user_id, e)
+            raise  # 向上传播，使 generate_daily_recommendations 可触发 _enqueue_retry_result
+
+    finally:
+        if lock_acquired:
+            await _release_daily_rec_lock(lock_key, token)
 
 
 # ── 定时任务 ───────────────────────────────────────────────────────────────────

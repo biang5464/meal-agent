@@ -85,6 +85,7 @@ async def test_generate_for_user_integrity_error_returns_existing():
     """INSERT 引发 IntegrityError（并发冲突）时，重新查询并返回已有记录（不返回 None）。"""
     from agents.daily_recommendation_agent import generate_for_user
     from sqlalchemy.exc import IntegrityError
+    from unittest.mock import AsyncMock as _AsyncMock
 
     existing_row = _make_row(dishes=[{"name": "番茄炒蛋"}])
     call_count = 0
@@ -93,17 +94,28 @@ async def test_generate_for_user_integrity_error_returns_existing():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # 第一次：幂等检查，用户不存在
+            # 第一次：幂等检查（锁外快速路径），用户不存在
             return _make_mock_session(first_return=None)
         elif call_count == 2:
-            # 第二次：写入尝试，commit 引发 IntegrityError
+            # 第二次：获得锁后幂等再确认，用户不存在
+            return _make_mock_session(first_return=None)
+        elif call_count == 3:
+            # 第三次：写入尝试，commit 引发 IntegrityError
             return _make_mock_session(first_return=None, commit_side_effect=IntegrityError("", {}, None))
         else:
-            # 第三次：IntegrityError 后重查，返回已有记录
+            # 第四次：IntegrityError 后重查，返回已有记录
             return _make_mock_session(first_return=existing_row)
+
+    _lock_result = MagicMock()
+    _lock_result.ok = True
+    _lock_result.data = True
 
     with (
         patch("agents.daily_recommendation_agent._session", side_effect=_session_factory),
+        patch("agents.daily_recommendation_agent._try_acquire_lock",
+              new=_AsyncMock(return_value=_lock_result)),
+        patch("agents.daily_recommendation_agent._release_daily_rec_lock",
+              new=_AsyncMock()),
         patch("agents.daily_recommendation_agent._get_user_profile", return_value={}),
         patch("agents.daily_recommendation_agent._get_same_day_dishes", return_value=([], "empty")),
         patch("agents.daily_recommendation_agent._get_recent_dishes", return_value=([], "empty")),
@@ -121,11 +133,20 @@ async def test_generate_for_user_integrity_error_returns_existing():
 async def test_generate_for_user_db_write_fail_raises():
     """非 IntegrityError DB 异常时，generate_for_user 应向上 raise，使 _enqueue_retry_result 生效。"""
     from agents.daily_recommendation_agent import generate_for_user
+    from unittest.mock import AsyncMock as _AsyncMock
 
     mock_session = _make_mock_session(first_return=None, commit_side_effect=RuntimeError("disk full"))
 
+    _lock_result = MagicMock()
+    _lock_result.ok = True
+    _lock_result.data = True
+
     with (
         patch("agents.daily_recommendation_agent._session", return_value=mock_session),
+        patch("agents.daily_recommendation_agent._try_acquire_lock",
+              new=_AsyncMock(return_value=_lock_result)),
+        patch("agents.daily_recommendation_agent._release_daily_rec_lock",
+              new=_AsyncMock()),
         patch("agents.daily_recommendation_agent._get_user_profile", return_value={}),
         patch("agents.daily_recommendation_agent._get_same_day_dishes", return_value=([], "empty")),
         patch("agents.daily_recommendation_agent._get_recent_dishes", return_value=([], "empty")),
