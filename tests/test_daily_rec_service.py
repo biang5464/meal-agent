@@ -205,3 +205,127 @@ async def test_enqueue_retry_no_auto_retry():
 
     assert not result.ok
     assert call_count == 1, f"不应重试，实际调用 {call_count} 次"
+
+
+# ── Phase 11C-A：steps 规范化与快照 ───────────────────────────────────────────
+
+def test_normalize_steps_string_wraps_to_single_element_list():
+    """字符串步骤应被包装为单元素列表，首尾空白去除。"""
+    from agents.daily_recommendation_agent import _normalize_recipe_steps
+    result = _normalize_recipe_steps("  番茄切块，鸡蛋炒熟。  ")
+    assert result == ["番茄切块，鸡蛋炒熟。"]
+
+
+def test_normalize_steps_list_filters_blank_and_strips():
+    """列表步骤应过滤空项、去除首尾空白，不修改原列表。"""
+    from agents.daily_recommendation_agent import _normalize_recipe_steps
+    original = ["步骤一", "  ", "", "  步骤三  ", 42]
+    original_copy = list(original)
+    result = _normalize_recipe_steps(original)
+    assert result == ["步骤一", "步骤三"]
+    assert original == original_copy, "原始列表不应被修改"
+
+
+def test_normalize_steps_none_and_invalid_types_return_empty_list():
+    """None 及非法类型应安全降级为空列表。"""
+    from agents.daily_recommendation_agent import _normalize_recipe_steps
+    assert _normalize_recipe_steps(None) == []
+    assert _normalize_recipe_steps(123) == []
+    assert _normalize_recipe_steps({"key": "val"}) == []
+    assert _normalize_recipe_steps("") == []
+    assert _normalize_recipe_steps("   ") == []
+
+
+@pytest.mark.asyncio
+async def test_dishes_snapshot_includes_steps_field():
+    """generate_for_user 写入 DB 的 dishes 快照应包含 steps 字段（list[str]）。"""
+    from agents.daily_recommendation_agent import generate_for_user
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    recipe = {
+        "name": "番茄炒蛋", "category": "半荤素",
+        "ingredients": ["番茄", "鸡蛋"],
+        "cuisine": "家常菜", "flavor": "鲜甜", "budget_tier": "low",
+        "steps": "番茄切块翻炒，鸡蛋打散炒熟，合炒调味。",
+    }
+
+    captured: list = []
+
+    def _track_add(obj):
+        captured.append(obj)
+
+    _lock_result = MagicMock()
+    _lock_result.ok = True
+    _lock_result.data = True
+
+    mock_session = _make_mock_session(first_return=None)
+    mock_session.add = MagicMock(side_effect=_track_add)
+
+    with (
+        patch("agents.daily_recommendation_agent._session", return_value=mock_session),
+        patch("agents.daily_recommendation_agent._try_acquire_lock",
+              new=_AsyncMock(return_value=_lock_result)),
+        patch("agents.daily_recommendation_agent._release_daily_rec_lock", new=_AsyncMock()),
+        patch("agents.daily_recommendation_agent._get_user_profile", return_value={}),
+        patch("agents.daily_recommendation_agent._get_same_day_dishes", return_value=([], "empty")),
+        patch("agents.daily_recommendation_agent._get_recent_dishes", return_value=([], "empty")),
+        patch("agents.daily_recommendation_agent.get_all_recipes", return_value=[recipe]),
+        patch("agents.daily_recommendation_agent._generate_reasoning",
+              new=AsyncMock(return_value="{}")),
+    ):
+        await generate_for_user("u1", meal_type="lunch", date_str="2026-07-18")
+
+    assert len(captured) == 1, "session.add は一度だけ呼ばれる"
+    dishes = captured[0].dishes
+    assert dishes, "dishes should not be empty"
+    for dish in dishes:
+        assert "steps" in dish, f"菜谱快照缺少 steps 字段: {dish}"
+    assert isinstance(dishes[0]["steps"], list), "steps 应为 list[str]"
+    assert dishes[0]["steps"] == ["番茄切块翻炒，鸡蛋打散炒熟，合炒调味。"]
+
+
+@pytest.mark.asyncio
+async def test_original_recipe_ingredients_not_mutated():
+    """dishes_data 中的 ingredients 应为防御性拷贝，不修改原始 recipe dict。"""
+    from agents.daily_recommendation_agent import generate_for_user
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    original_ingredients = ["番茄", "鸡蛋"]
+    recipe = {
+        "name": "番茄炒蛋", "category": "半荤素",
+        "ingredients": original_ingredients,
+        "cuisine": "家常菜", "flavor": "鲜甜", "budget_tier": "low",
+        "steps": "简单做法。",
+    }
+
+    captured: list = []
+
+    def _track_add(obj):
+        captured.append(obj)
+
+    _lock_result = MagicMock()
+    _lock_result.ok = True
+    _lock_result.data = True
+
+    mock_session = _make_mock_session(first_return=None)
+    mock_session.add = MagicMock(side_effect=_track_add)
+
+    with (
+        patch("agents.daily_recommendation_agent._session", return_value=mock_session),
+        patch("agents.daily_recommendation_agent._try_acquire_lock",
+              new=_AsyncMock(return_value=_lock_result)),
+        patch("agents.daily_recommendation_agent._release_daily_rec_lock", new=_AsyncMock()),
+        patch("agents.daily_recommendation_agent._get_user_profile", return_value={}),
+        patch("agents.daily_recommendation_agent._get_same_day_dishes", return_value=([], "empty")),
+        patch("agents.daily_recommendation_agent._get_recent_dishes", return_value=([], "empty")),
+        patch("agents.daily_recommendation_agent.get_all_recipes", return_value=[recipe]),
+        patch("agents.daily_recommendation_agent._generate_reasoning",
+              new=AsyncMock(return_value="{}")),
+    ):
+        await generate_for_user("u1", meal_type="lunch", date_str="2026-07-18")
+
+    assert len(captured) == 1
+    dishes = captured[0].dishes
+    # Verify the snapshot ingredients list is a different object from the original
+    assert dishes[0]["ingredients"] is not original_ingredients, "应为防御性拷贝，不应是同一对象"
+    assert dishes[0]["ingredients"] == original_ingredients
