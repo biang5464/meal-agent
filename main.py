@@ -3,14 +3,16 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from typing import Annotated
 
 import core.runtime_paths as _rp
 
 from core.web_config import get_allowed_origins
 from core.api_security import get_api_security_config, AuthMiddleware
 from core.rate_limit import get_rate_limit_config, RateLimitMiddleware
+from core.user_identity import require_current_user_id
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -117,9 +119,12 @@ app.add_middleware(AuthMiddleware, config=_AUTH_CONFIG)
 # ---------- 请求/响应模型 ----------
 
 class RecommendRequest(BaseModel):
-    user_id: str
     message: str = Field(..., max_length=1000, min_length=1)
     chat_history: list = []
+
+
+class GenerateRecommendationRequest(BaseModel):
+    meal_type: str = "lunch"
 
 
 # ---------- 路由 ----------
@@ -130,17 +135,22 @@ async def health():
 
 
 @app.post("/recommend")
-async def recommend(req: RecommendRequest):
+async def recommend(
+    req: RecommendRequest,
+    current_user_id: Annotated[str, Depends(require_current_user_id)],
+):
     """
     SSE 流式饮食推荐接口。
 
     客户端使用 EventSource 或 fetch+ReadableStream 消费，
     每个 data: 事件携带一个 token 片段，最后以 [DONE] 结束。
+    用户身份由代理注入的 X-Meal-Agent-User-ID header 提供，
+    不信任请求体中的任何 user_id 字段。
     """
     async def event_generator():
         queue: asyncio.Queue = asyncio.Queue()
         message = req.message.strip()
-        task = asyncio.create_task(run_with_queue(req.user_id, message, queue))
+        task = asyncio.create_task(run_with_queue(current_user_id, message, queue))
 
         # Graph watchdog：整体执行超过 GRAPH 秒时，向 queue 注入降级消息并取消 task
         async def _watchdog():
@@ -209,13 +219,15 @@ async def tracked_terms(days: int = 30):
 
 @app.get("/api/daily-recommendation")
 async def get_daily_recommendation(
-    user_id: str,
+    current_user_id: Annotated[str, Depends(require_current_user_id)],
     date: str | None = None,
     meal_type: str = "lunch",
 ):
     """
     获取用户今日（或指定日期）推荐。
     若当日推荐尚未生成，自动触发生成后返回。
+    用户身份由代理注入的 X-Meal-Agent-User-ID header 提供。
+    查询参数中的 user_id 不受信任且被忽略。
     """
     from datetime import date as _date
     from agents.daily_recommendation_agent import generate_for_user
@@ -227,7 +239,7 @@ async def get_daily_recommendation(
         rec = (
             session.query(DailyRecommendationORM)
             .filter(
-                DailyRecommendationORM.user_id == user_id,
+                DailyRecommendationORM.user_id == current_user_id,
                 DailyRecommendationORM.date == target_date,
                 DailyRecommendationORM.meal_type == meal_type,
             )
@@ -251,7 +263,7 @@ async def get_daily_recommendation(
 
     from agents.daily_recommendation_agent import LockBusy, LockDegraded
     try:
-        result = await generate_for_user(user_id, meal_type=meal_type, date_str=target_date, generated_by="lazy")
+        result = await generate_for_user(current_user_id, meal_type=meal_type, date_str=target_date, generated_by="lazy")
     except LockBusy:
         raise HTTPException(status_code=503, detail="推荐生成繁忙，请稍后重试")
     except LockDegraded:
@@ -262,21 +274,20 @@ async def get_daily_recommendation(
 
 
 @app.post("/api/daily-recommendation/generate")
-async def trigger_daily_recommendation(payload: dict):
+async def trigger_daily_recommendation(
+    req: GenerateRecommendationRequest,
+    current_user_id: Annotated[str, Depends(require_current_user_id)],
+):
     """
-    手动触发为指定用户生成今日推荐。
-    payload: {"user_id": "...", "meal_type": "lunch"|"dinner"}
+    手动触发为当前用户生成今日推荐。
+    用户身份由代理注入的 X-Meal-Agent-User-ID header 提供。
+    请求体中的 user_id 不受信任且被忽略。
     """
     from agents.daily_recommendation_agent import generate_for_user
 
-    user_id   = payload.get("user_id", "")
-    meal_type = payload.get("meal_type", "lunch")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id 不能为空")
-
     from agents.daily_recommendation_agent import LockBusy, LockDegraded
     try:
-        result = await generate_for_user(user_id, meal_type=meal_type, generated_by="manual")
+        result = await generate_for_user(current_user_id, meal_type=req.meal_type, generated_by="manual")
     except LockBusy:
         raise HTTPException(status_code=503, detail="推荐生成繁忙，请稍后重试")
     except LockDegraded:
@@ -286,15 +297,20 @@ async def trigger_daily_recommendation(payload: dict):
     return result
 
 
-@app.get("/users/{user_id}/profile")
-async def get_profile(user_id: str):
-    """获取用户画像（调试用）。"""
+@app.get("/users/me/profile")
+async def get_profile(
+    current_user_id: Annotated[str, Depends(require_current_user_id)],
+):
+    """获取当前用户画像（调试用）。"""
     # TODO: 调用 get_user_profile tool 或直接查库
     raise HTTPException(status_code=501, detail="Not implemented yet")
 
 
-@app.put("/users/{user_id}/profile")
-async def update_profile(user_id: str, payload: dict):
-    """更新用户画像字段。"""
+@app.put("/users/me/profile")
+async def update_profile(
+    current_user_id: Annotated[str, Depends(require_current_user_id)],
+    payload: dict,
+):
+    """更新当前用户画像字段。"""
     # TODO: 调用 update_user_profile tool
     raise HTTPException(status_code=501, detail="Not implemented yet")

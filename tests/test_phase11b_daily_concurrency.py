@@ -565,7 +565,7 @@ class TestApi503:
                       AsyncMock(side_effect=LockBusy("busy"))),
             ):
                 with pytest.raises(HTTPException) as exc:
-                    await get_daily_recommendation(user_id="u1", date="2026-07-26", meal_type="lunch")
+                    await get_daily_recommendation(current_user_id="u1", date="2026-07-26", meal_type="lunch")
             return exc.value.status_code
 
         status = asyncio.run(_run())
@@ -583,7 +583,7 @@ class TestApi503:
                       AsyncMock(side_effect=LockDegraded("redis down"))),
             ):
                 with pytest.raises(HTTPException) as exc:
-                    await get_daily_recommendation(user_id="u1", date="2026-07-26", meal_type="lunch")
+                    await get_daily_recommendation(current_user_id="u1", date="2026-07-26", meal_type="lunch")
             return exc.value.status_code
 
         status = asyncio.run(_run())

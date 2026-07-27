@@ -9,8 +9,6 @@ import { apiUrl } from './lib/api';
 const PriceChart = dynamic(() => import('./components/PriceChart'), { ssr: false });
 const DailyRecommendation = dynamic(() => import('./components/DailyRecommendation'), { ssr: false });
 
-const USER_ID = 'test_user';
-
 type Message = {
   role: 'user' | 'agent';
   content: string;
@@ -50,7 +48,7 @@ export default function ChatPage() {
       const res = await fetch(apiUrl('/recommend'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: USER_ID, message: text }),
+        body: JSON.stringify({ message: text }),
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -132,20 +130,20 @@ export default function ChatPage() {
       <header className="bg-white border-b border-gray-200 px-6 py-4 shadow-sm flex-shrink-0 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-gray-800">饮食推荐助手</h1>
-          <p className="text-xs text-gray-400 mt-0.5">user: {USER_ID}</p>
+          <p className="text-xs text-gray-400 mt-0.5">匿名访客</p>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => setShowDailyRec(true)}
             className="px-3 py-1.5 text-sm rounded bg-orange-500 text-white hover:bg-orange-600 transition-colors"
           >
-            🍽️ 今日推荐
+            今日推荐
           </button>
           <button
             onClick={() => setShowPricePanel(true)}
             className="px-3 py-1.5 text-sm rounded bg-indigo-500 text-white hover:bg-indigo-600 transition-colors"
           >
-            📈 价格走势
+            价格走势
           </button>
         </div>
       </header>
@@ -257,7 +255,6 @@ export default function ChatPage() {
       {/* 今日推荐弹出面板 */}
       {showDailyRec && (
         <DailyRecommendation
-          userId={USER_ID}
           onClose={() => setShowDailyRec(false)}
         />
       )}
