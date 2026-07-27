@@ -41,6 +41,28 @@ end
 """
 
 
+def _normalize_recipe_steps(value) -> list[str]:
+    """Normalize recipe steps to list[str] for stable JSON storage.
+
+    - str  → single-element list (stripped); empty string → []
+    - list → filter non-str / blank items, strip each
+    - None / other → []
+    Does not modify the original object.
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            if isinstance(item, str):
+                stripped = item.strip()
+                if stripped:
+                    result.append(stripped)
+        return result
+    return []
+
+
 class LockBusy(Exception):
     """Lock held by another request; wait timeout elapsed."""
 
@@ -478,15 +500,16 @@ async def generate_for_user(
         # LLM 推理
         reasoning = await _generate_reasoning(selected, profile, meal_type)
 
-        # 构建 dishes 数据
+        # 构建 dishes 数据（快照：不修改原始 recipe dict）
         dishes_data = [
             {
                 "name":        r.get("name"),
                 "category":    r.get("category"),
-                "ingredients": r.get("ingredients", []),
+                "ingredients": list(r.get("ingredients", [])),
                 "cuisine":     r.get("cuisine"),
                 "flavor":      r.get("flavor"),
                 "budget_tier": r.get("budget_tier"),
+                "steps":       _normalize_recipe_steps(r.get("steps")),
             }
             for r in selected
         ]
