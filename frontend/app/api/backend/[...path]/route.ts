@@ -5,13 +5,21 @@
  * - MEAL_AGENT_API_KEY is a server-only env var (no NEXT_PUBLIC_ prefix).
  * - The key is injected into the X-API-Key header server-side and never
  *   returned to the browser or included in any response.
+ * - Client-supplied X-Meal-Agent-User-ID and X-API-Key headers are stripped
+ *   unconditionally; the proxy re-injects both from server state.
+ * - For user-scoped paths, an anonymous session is resolved from
+ *   MEAL_AGENT_SESSION_SECRET (HttpOnly HMAC cookie). Missing secret in
+ *   production → 503 fail-close before any upstream request.
  * - Client IP is hashed by the backend; raw IP is forwarded only to the
  *   backend as X-Client-IP for rate-limit bucketing, never stored.
  * - SSE responses (/recommend) are streamed via response.body — no buffering.
+ *   Set-Cookie is added to response headers before the Response is created,
+ *   so it works for both streaming and non-streaming responses.
  * - Hop-by-hop headers are stripped from both directions.
  */
 
 import { NextRequest } from 'next/server';
+import { resolveAnonymousSession } from '../../../lib/server/anonymous-session';
 
 // Headers that must not be forwarded (hop-by-hop)
 const HOP_BY_HOP = new Set([
@@ -26,6 +34,29 @@ const HOP_BY_HOP = new Set([
   // Next.js internal
   'host',
 ]);
+
+// Browser-supplied identity headers the proxy must strip unconditionally.
+// The proxy re-injects correct values from server state (API key, session cookie).
+const STRIPPED_CLIENT_HEADERS = new Set([
+  'x-meal-agent-user-id',
+  'x-api-key',
+]);
+
+// Paths that require an authenticated anonymous session.
+// Non-scoped paths (health, price-history, tracked-terms) are forwarded without
+// a session so missing MEAL_AGENT_SESSION_SECRET does not block status checks.
+const _USER_SCOPED_EXACT = new Set([
+  '/recommend',
+  '/api/daily-recommendation',
+  '/api/daily-recommendation/generate',
+]);
+const _USER_SCOPED_PREFIXES = ['/users/'];
+
+function _isUserScopedPath(path: string): boolean {
+  if (_USER_SCOPED_EXACT.has(path)) return true;
+  if (path.startsWith('/api/daily-recommendation/')) return true;
+  return _USER_SCOPED_PREFIXES.some(prefix => path.startsWith(prefix));
+}
 
 type Context = { params: Promise<{ path: string[] }> };
 
@@ -99,10 +130,12 @@ async function proxy(request: NextRequest, context: Context): Promise<Response> 
   const xForwardedFor = request.headers.get('x-forwarded-for') ?? '';
   const clientIp = xForwardedFor.split(',')[0]?.trim() ?? request.headers.get('x-real-ip') ?? '';
 
-  // Build forwarded headers — strip hop-by-hop, inject auth and client IP
+  // Build forwarded headers — strip hop-by-hop AND client-supplied identity headers.
+  // X-API-Key and X-Meal-Agent-User-ID are re-injected below from server state.
   const forwardHeaders = new Headers();
   request.headers.forEach((value, key) => {
-    if (!HOP_BY_HOP.has(key.toLowerCase())) {
+    const lower = key.toLowerCase();
+    if (!HOP_BY_HOP.has(lower) && !STRIPPED_CLIENT_HEADERS.has(lower)) {
       forwardHeaders.set(key, value);
     }
   });
@@ -111,6 +144,19 @@ async function proxy(request: NextRequest, context: Context): Promise<Response> 
   }
   if (clientIp) {
     forwardHeaders.set('X-Client-IP', clientIp);
+  }
+
+  // Resolve anonymous session for user-scoped paths and inject identity header
+  let setCookieHeader: string | undefined;
+  if (_isUserScopedPath(backendPath)) {
+    const session = await resolveAnonymousSession(request);
+    if (session === null) {
+      // Production misconfiguration: MEAL_AGENT_SESSION_SECRET missing or invalid
+      console.error('[proxy] config_error=missing_session_secret');
+      return new Response(_503_CONFIG_ERROR, { status: 503, headers: _JSON_HEADERS });
+    }
+    forwardHeaders.set('X-Meal-Agent-User-ID', session.userId);
+    setCookieHeader = session.setCookieHeader;
   }
 
   // Forward body for methods that carry one
@@ -144,6 +190,14 @@ async function proxy(request: NextRequest, context: Context): Promise<Response> 
       responseHeaders.set(key, value);
     }
   });
+
+  // Attach Set-Cookie when a new anonymous session was created.
+  // This is set on responseHeaders before the Response is constructed, so it is
+  // included in both streaming SSE responses and regular JSON responses without
+  // buffering the body.
+  if (setCookieHeader) {
+    responseHeaders.set('Set-Cookie', setCookieHeader);
+  }
 
   const contentType = upstreamResponse.headers.get('content-type') ?? '';
 

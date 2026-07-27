@@ -127,19 +127,32 @@ Volumes are mounted as root by default, and a non-root user cannot write to
 4. Deploy. After every change to these variables, trigger a new Vercel deploy
    for the new values to take effect.
 
-### Environment variables (Vercel — server-only)
+### Environment variables (Cloudflare / Vercel — server-only)
 
 ```
 MEAL_AGENT_BACKEND_URL=https://<your-railway-domain>
 MEAL_AGENT_API_KEY=<same secret as Railway MEAL_AGENT_API_KEY>
+MEAL_AGENT_SESSION_SECRET=<generate — see below>
 ```
 
+Generate `MEAL_AGENT_SESSION_SECRET` (PowerShell):
+```powershell
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+[Convert]::ToBase64String($bytes)
+```
+
+**For Cloudflare Workers:** add `MEAL_AGENT_SESSION_SECRET` as a **Secret** (not
+Plaintext) in Cloudflare Dashboard → Workers → meal-agent-fronted → Settings →
+Variables. Do not write it to `wrangler.jsonc`.
+
 **Security rules:**
-- Both variables are server-only. Never use `NEXT_PUBLIC_MEAL_AGENT_API_KEY`
-  or any `NEXT_PUBLIC_*` variant for secrets.
-- The API key is injected into the `X-API-Key` header inside the Vercel Route
-  Handler and never returned to the browser or included in any response body.
-- The browser communicates only with same-origin Vercel routes (`/api/backend/*`),
+- All three variables are server-only. Never use any `NEXT_PUBLIC_*` prefix.
+- The API key is injected into the `X-API-Key` header server-side and never
+  returned to the browser or included in any response body.
+- `MEAL_AGENT_SESSION_SECRET` signs the anonymous session cookie (HMAC-SHA-256).
+  Missing or placeholder value in production → 503 fail-close on user-scoped paths.
+- The browser communicates only with same-origin routes (`/api/backend/*`),
   never directly with the Railway domain.
 
 ### How the proxy works
@@ -168,16 +181,20 @@ Leave `MEAL_AGENT_API_KEY` empty when `API_AUTH_ENABLED=false` on the local back
 
 ---
 
-## Phase 10D4 security summary
+## Security summary (Phase 12A)
 
 | Layer | Mechanism |
 |---|---|
 | Auth | `X-API-Key` checked by `AuthMiddleware` (pure ASGI, no SSE buffering) |
 | Rate limit | Redis atomic Lua INCR+EXPIRE; `/recommend` 10 req/min, read APIs 60 req/min |
-| Key exposure | API key only in Railway env var + Vercel server env var; never in browser |
+| Key exposure | API key only in Railway + Cloudflare/Vercel server env; never in browser |
 | IP privacy | Client IPs are SHA-256 hashed before use in Redis keys; raw IPs never stored |
 | Proxy errors | Fixed generic message returned; internal details logged server-side only |
 | Redis failure | Production + cost-bearing endpoint → 503 fail-close (LLM not called) |
+| User identity | Anonymous session cookie (HttpOnly, Secure, SameSite=Lax, HMAC-SHA-256) |
+| IDOR prevention | Backend trusts only `X-Meal-Agent-User-ID` injected by the proxy; body/query `user_id` ignored |
+| Session secret | Cloudflare Secret only; missing in production → 503 fail-close |
+| Client forgery | `x-meal-agent-user-id` and `x-api-key` stripped from browser requests by proxy |
 
 ---
 

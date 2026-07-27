@@ -67,11 +67,10 @@ const MEAL_LABELS: Record<string, string> = {
 };
 
 type Props = {
-  userId: string;
   onClose: () => void;
 };
 
-export default function DailyRecommendation({ userId, onClose }: Props) {
+export default function DailyRecommendation({ onClose }: Props) {
   const [mealType, setMealType] = useState<'lunch' | 'dinner'>('lunch');
   const [data, setData] = useState<Recommendation | null>(null);
   const [loading, setLoading] = useState(false);
@@ -93,7 +92,7 @@ export default function DailyRecommendation({ userId, onClose }: Props) {
     setError(null);
     try {
       const res = await fetch(
-        apiUrl(`/api/daily-recommendation?user_id=${encodeURIComponent(userId)}&meal_type=${type}`),
+        apiUrl(`/api/daily-recommendation?meal_type=${type}`),
       );
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -106,7 +105,7 @@ export default function DailyRecommendation({ userId, onClose }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, []);
 
   useEffect(() => {
     fetchRecommendation(mealType);
@@ -119,7 +118,7 @@ export default function DailyRecommendation({ userId, onClose }: Props) {
       const res = await fetch(apiUrl('/api/daily-recommendation/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, meal_type: mealType }),
+        body: JSON.stringify({ meal_type: mealType }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
